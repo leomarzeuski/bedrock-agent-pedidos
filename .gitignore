@@ -1,0 +1,31 @@
+# Terraform state — contém account ID, ARNs, nomes de IAM. NUNCA commitar.
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Diretório de trabalho do Terraform (providers, plugins) — pesado, não versionar.
+.terraform/
+.terraform.tfstate.lock.info
+
+# Variáveis — costumam ter segredos. (.terraform.lock.hcl NÃO entra aqui: deve ser commitado.)
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Artefato de build do Lambda (regenerado pelo terraform)
+lambda_payload.zip
+
+# Saídas locais de invocação
+resposta.json
