@@ -1,12 +1,14 @@
 """Entrada da Lambda do action group. Faz o dispatch para as funcoes do agente.
 
-Funcoes: consultar_cardapio, listar_lojas, validar_cep, cotar_pedido, criar_pedido.
+Funcoes: consultar_cardapio, listar_lojas, adicionar_itens, ver_carrinho,
+limpar_carrinho, revisar_pedido, finalizar_pedido. As funcoes de carrinho leem e
+escrevem o carrinho em sessionAttributes, que o Bedrock mantem entre os turnos.
 """
 
 import json
 
+import carrinho
 import geo
-import pedido
 from dados import CARDAPIO, CATEGORIAS, LOJAS
 
 
@@ -30,19 +32,34 @@ def consultar_cardapio(params):
             continue
         if loja_id and loja_id not in it["lojas"]:
             continue
+        # Disponivel agora = dentro da janela do item E com alguma loja dele aberta.
+        na_janela = geo.item_disponivel(it)
+        loja_aberta = any(geo.loja_aberta(LOJAS[l]) for l in it["lojas"])
         registro = {
             "id": it["id"],
             "nome": it["nome"],
             "descricao": it["descricao"],
             "lojas": it["lojas"],
-            "disponivel_agora": geo.item_disponivel(it),
+            "disponivel_agora": na_janela and loja_aberta,
         }
+        if not registro["disponivel_agora"]:
+            if not na_janela:
+                registro["obs_disponibilidade"] = (
+                    f"disponivel so das {it['disponivel_de']} as {it['disponivel_ate']}")
+            else:
+                lojas_txt = "; ".join(f"{LOJAS[l]['nome']} ({LOJAS[l]['horario_texto']})"
+                                      for l in it["lojas"])
+                registro["obs_disponibilidade"] = f"vendido so na {lojas_txt}, fechada agora"
         if it["tipo"] == "pizza":
             registro["tamanhos"] = it["tamanhos"]
             registro["meio_a_meio"] = True
         elif it["tipo"] == "combo":
             registro["preco"] = it["preco"]
             registro["inclui"] = it["inclui"]
+        elif it["tipo"] == "peso":
+            registro["preco_por_kg"] = it["preco_por_kg"]
+            registro["minimo_g"] = it["minimo_g"]
+            registro["unidade"] = "kg (pedido em gramas)"
         else:
             registro["preco"] = it["preco"]
         if it.get("disponivel_de"):
@@ -65,21 +82,27 @@ def listar_lojas():
     } for loja in LOJAS.values()]}
 
 
-_FUNCOES = {
-    "consultar_cardapio": lambda p: consultar_cardapio(p),
-    "listar_lojas": lambda p: listar_lojas(),
-    "validar_cep": lambda p: geo.consultar_cep(p.get("cep", "")),
-    "cotar_pedido": lambda p: pedido.cotar_pedido(p),
-    "criar_pedido": lambda p: pedido.criar_pedido(p),
-}
-
-
 def lambda_handler(event, context):
     function = event.get("function", "")
     params = {p["name"]: p["value"] for p in event.get("parameters", [])}
+    session_attrs = dict(event.get("sessionAttributes") or {})
 
-    executor = _FUNCOES.get(function)
-    result = executor(params) if executor else {"erro": f"Funcao desconhecida: {function}"}
+    if function == "consultar_cardapio":
+        result = consultar_cardapio(params)
+    elif function == "listar_lojas":
+        result = listar_lojas()
+    elif function == "adicionar_itens":
+        result = carrinho.adicionar_itens(params, session_attrs)
+    elif function == "ver_carrinho":
+        result = carrinho.ver_carrinho(session_attrs)
+    elif function == "limpar_carrinho":
+        result = carrinho.limpar_carrinho(session_attrs)
+    elif function == "revisar_pedido":
+        result = carrinho.revisar_pedido(params, session_attrs)
+    elif function == "finalizar_pedido":
+        result = carrinho.finalizar_pedido(params, session_attrs)
+    else:
+        result = {"erro": f"Funcao desconhecida: {function}"}
 
     return {
         "messageVersion": "1.0",
@@ -90,6 +113,6 @@ def lambda_handler(event, context):
                 "responseBody": {"TEXT": {"body": json.dumps(result, ensure_ascii=False)}}
             },
         },
-        "sessionAttributes": event.get("sessionAttributes", {}),
+        "sessionAttributes": session_attrs,
         "promptSessionAttributes": event.get("promptSessionAttributes", {}),
     }

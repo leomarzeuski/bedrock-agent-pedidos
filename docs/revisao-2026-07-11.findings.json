@@ -1,0 +1,802 @@
+{
+  "confirmed": [
+    {
+      "severity": "critical",
+      "title": "finalizar_pedido não registra o pedido em lugar nenhum",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "line": 186,
+      "description": "O 'registro' do pedido é fictício: a função gera um PED-{uuid} em memória, devolve o JSON ao modelo e apaga o carrinho. Não há escrita em DynamoDB, S3, SQS, nem sequer um log estruturado. Cenário: cliente finaliza, recebe 'Pedido PED-1A2B3C4D confirmado' — e a padaria nunca fica sabendo do pedido; o número não pode ser consultado por ninguém. Para o objetivo de 'atendente completo' isso é o gap mais grave do fluxo.",
+      "evidence": "resultado[\"pedido_id\"] = f\"PED-{uuid.uuid4().hex[:8].upper()}\" ... session_attrs.pop(CHAVE, None); return resultado — nenhuma chamada de persistência em todo o lambda/ (grep por boto3/dynamodb/s3 retorna vazio).",
+      "recommendation": "Persistir o pedido (DynamoDB é o natural aqui: PK=pedido_id, itens, loja, endereço, total, timestamp) antes de esvaziar o carrinho, e adicionar permissão no iam.tf. No mínimo, um print(json.dumps(pedido)) para CloudWatch enquanto não há tabela.",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "critical",
+        "reasoning": "Confirmado no código: em /Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py (linhas 180-193), finalizar_pedido gera o pedido_id em memória (linha 186: PED-{uuid.uuid4().hex[:8].upper()}), devolve o dict ao modelo e apaga o carrinho (session_attrs.pop), apesar de a docstring afirmar que \"registra o pedido\". Grep em todo lambda/ e nos arquivos .tf por boto3/dynamodb/s3/sqs/sns/put_item/logging/print retorna zero ocorrências — não há persistência, fila, nem sequer um print para CloudWatch, e o Terraform (agent.tf, lambda.tf, iam.tf) não provisiona tabela/bucket nem permissões para isso. O cenário de falha se sustenta: o cliente recebe uma confirmação com número de pedido que não existe em lugar nenhum e a padaria nunca fica sabendo. Para o objetivo do dono (atendente completo de padaria multi-loja), a efetivação do pedido é a função central do produto, e ela é fictícia — severidade critical mantida. A recomendação (persistir em DynamoDB antes de esvaziar o carrinho + permissão no iam.tf; interinamente um print(json.dumps(pedido))) é correta e proporcional."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Não existe remover item nem alterar quantidade — só limpar tudo; duplicatas sem proteção",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "line": 143,
+      "description": "As únicas ferramentas são adicionar/ver/limpar/revisar/finalizar. Cenários concretos: (1) Nova Pro repete a chamada de adicionar_itens (comum quando reformula a resposta) → item duplicado no carrinho e nenhuma forma de tirar só ele; (2) cliente diz 'na verdade só uma pizza, tira a outra' → o modelo só pode limpar_carrinho e re-adicionar tudo, e se o re-add falhar o pedido inteiro se perde; (3) item de café da manhã adicionado às 10:55 fica preso no carrinho após 11:00 — precificar() passa a falhar em revisar/finalizar e a única saída é apagar o carrinho inteiro.",
+      "evidence": "limpar_carrinho faz session_attrs.pop(CHAVE) e adicionar_itens faz cart[\"itens\"].extend(novos) sem dedupe; nenhuma função remover_item/alterar_qtd em carrinho.py nem no agent.tf.",
+      "recommendation": "Adicionar funções remover_item (por índice ou id) e alterar_quantidade no action group, e considerar mesclar linhas idênticas (mesmo id/tamanho/borda/meio-a-meio/obs) somando qtd ao adicionar.",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Finding confirmado integralmente no código. (1) agent.tf (linhas 48–90) e handler.py (94–103) expõem apenas adicionar_itens/ver_carrinho/limpar_carrinho/revisar_pedido/finalizar_pedido — não há remover_item nem alterar_quantidade em nenhum arquivo. (2) carrinho.py:127 faz cart[\"itens\"].extend(novos) sem dedupe/merge nem idempotência: retry do modelo duplica a linha e não há como tirar só ela. (3) limpar_carrinho (carrinho.py:143) faz pop da chave inteira — corrigir um item exige apagar tudo e re-adicionar, reconstruindo tamanho/borda/meio-a-meio do histórico, fluxo frágil com Nova Pro. (4) O cenário do item fora da janela é até PIOR que o descrito: pedido.precificar (pedido.py:134–136) valida geo.item_disponivel em toda chamada, e ver_carrinho também passa por precificar (via _resumo), então após a janela fechar o cliente nem consegue ver o carrinho — revisar, finalizar e ver falham, e a única saída é limpar tudo. Severidade high se mantém: para um atendente completo de padaria multi-loja, remover item/alterar quantidade é operação central de carrinho, e o cenário 4 cria beco sem saída funcional em fluxo comum (pedido montado perto do fim da janela de um item)."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "parse_itens: qtd não numérica vira 1 silenciosamente — cliente recebe quantidade errada",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/pedido.py",
+      "line": 28,
+      "description": "Se o Nova Pro mandar 'bb05|duas', 'bb05|2x' ou 'bb05|2 unidades', qtd.isdigit() é False e a quantidade cai para 1 sem nenhum erro: o pedido fecha com 1 item quando o cliente pediu 2, e ninguém percebe. Para salgados por peso é pior: 'sg01|500g' vira gramas=1 e a mensagem devolvida é 'pedido minimo de 250g (voce pediu 1g)' — verificado em execução. Também '1.5' e '-2' caem em 1 silenciosamente.",
+      "evidence": "item[\"qtd\"] = int(qtd) if qtd.isdigit() else 1 — testado: parse_itens('bb05|duas') → {'id': 'bb05', 'qtd': 1}; parse_itens('sg01|500g') → qtd=1.",
+      "recommendation": "Se o campo qtd existir e não for numérico, retornar erro explícito ('quantidade invalida: duas') em vez de assumir 1; opcionalmente extrair dígitos ('500g' → 500) antes de falhar.",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Confirmado no código e em execução: lambda/pedido.py linha 28 faz `int(qtd) if qtd.isdigit() else 1`, então 'duas', '2x', '1.5', '-2' e '500g' viram qtd=1 sem erro (testado com python3); '-2' ainda contorna a guarda qtd<1 de _monta_linha, e 'sg01|500g' gera o erro enganoso \"voce pediu 1g\". Porém a severidade high é exagerada: (1) o gatilho exige que o Nova Pro viole um formato numérico documentado com exemplos em agent.tf (linha 61) e instructions.txt (linhas 30–32); (2) o fluxo mostra o carrinho com quantidades após cada adição (instructions.txt linha 19) e exige revisar_pedido + confirmação antes de registrar (linhas 34–35), então um \"1×\" indevido é visível ao cliente em dois momentos antes de fechar — não é falha totalmente silenciosa; (3) o caso por peso retorna erro (confuso, mas erro), não pedido errado. Fica como medium: coerção fail-open em campo que afeta cobrança é defeito real e a correção (erro explícito para qtd não numérica) é trivial e elimina a classe de falha."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Campos fora de ordem e obs com '|' ou ';' são engolidos sem erro — observações somem para a cozinha",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/pedido.py",
+      "line": 29,
+      "description": "Três cenários concretos: (1) para item não-pizza o modelo naturalmente escreve 'hb01|2|sem picles' — 'sem picles' cai no slot tamanho, que _monta_linha nunca lê para tipo != pizza, e a observação desaparece silenciosamente (verificado: vira {'tamanho': 'sem picles'} e a linha sai sem obs); (2) obs contendo '|': 'pz04|1|grande|catupiry|pz01|metade bem passada | sem cebola' → o trecho ' sem cebola' vira campos[6] e é descartado (verificado); (3) obs contendo ';': 'hb01|1||||sem cebola; capricha' quebra em um segundo bloco cujo id é 'capricha' → erro 'Item inexistente: capricha' e o add inteiro falha.",
+      "evidence": "campos = [c.strip() for c in bloco.split(\"|\")] com slots posicionais fixos; campos[6:] nunca são lidos; _monta_linha só lê 'tamanho'/'borda' quando produto['tipo'] == 'pizza'.",
+      "recommendation": "Para não-pizza, tratar campos[2:] não vazios como obs (juntando-os) ou retornar erro de formato; para obs, juntar campos[5:] com '|' ('|'.join(campos[5:])); limitar split de ';' apenas fora do último campo é difícil — documentar no schema que obs não pode conter ';' e sanitizar.",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Os três cenários foram reproduzidos mecanicamente com o código real (python3, sem rede). (1) 'hb01|2|sem picles' → parse gera {'tamanho': 'sem picles'} e _monta_linha (pedido.py:92-108) só lê tamanho/borda quando tipo == 'pizza'; hb01 é tipo 'simples', então a linha sai sem obs e sem erro — perda silenciosa. (2) obs com '|': 'pz04|1|grande|catupiry|pz01|metade bem passada | sem cebola' → obs vira só 'metade bem passada'; campos[6:] nunca são lidos (parse_itens, pedido.py:22-36) — descarte silencioso. (3) obs com ';': 'hb01|1||||sem cebola; capricha' → segundo bloco com id 'capricha' → 'Item inexistente: capricha' e adicionar_itens falha inteiro (falha ruidosa, recuperável). Agravantes verificados: nem agent.tf:61 nem instructions.txt:30 trazem exemplo de obs para item não-pizza (o formato correto exige 4 slots vazios: 'hb01|2||||obs'), não há sanitização de separadores, o resumo do carrinho não exibe a obs perdida (cliente confirma achando que foi registrada) e o agente roda em Nova Pro/Lite, com formatação menos confiável. Atenuante: depende do modelo errar o formato ou de obs conter '|'/';' — não é determinístico no caminho feliz —, mas o padrão posicional frágil torna o cenário 1 provável em uso real. Perda silenciosa de observações de preparo (potencialmente restrições alimentares) justifica manter severidade high."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "Loja forçada é silenciosamente ignorada quando o carrinho já tem itens",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "line": 98,
+      "description": "adicionar_itens valida o parâmetro loja (linha 93-95) mas, se cart['itens'] não está vazio, o valor forçado nunca é comparado com cart['loja']: só se checa se o item existe na loja do carrinho. Cenário: carrinho na loja A; cliente diz 'adiciona uma coca da loja B' (item vendido em A e B) → o item entra na loja A sem nenhum aviso, e o cliente é atendido pela loja errada (frete e horários diferentes entre A e B).",
+      "evidence": "if cart[\"itens\"]: loja_id = cart[\"loja\"] ... — a variável forcada não é usada em nenhum ponto desse ramo.",
+      "recommendation": "Se forcada estiver presente e for diferente de cart['loja'], retornar erro explicando que o carrinho está na outra loja e oferecendo finalizar ou limpar antes de trocar.",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "CONFIRMADO por leitura do código e simulação local. Em lambda/carrinho.py, adicionar_itens valida `forcada` (linhas 93-95), mas no ramo de carrinho não-vazio (linhas 98-106) a variável nunca é comparada com cart[\"loja\"] — só se verifica se o item existe na loja do carrinho. Simulação reproduziu o cenário exato: carrinho na loja A (pz02), chamada com loja='B' e item hb01 (vendido em A e B) retorna sucesso=true e adiciona o item à loja A, sem qualquer aviso. O cenário é plausível: 42 dos 110 itens do cardápio existem nas duas lojas, e o schema em agent.tf instrui o modelo a passar `loja` justamente quando o cliente escolheu explicitamente — exatamente o sinal que é descartado. Consequência real: frete e horários diferem por loja, então o cliente é atendido pela loja errada. Atenuantes que mantêm a severidade em medium (não high): (1) se o item não existir na loja do carrinho, o erro das linhas 103-106 já explica corretamente; (2) o retorno inclui o nome da loja efetiva, dando ao LLM uma chance de perceber a divergência — porém frágil, pois a ferramenta sinaliza sucesso e as instruções só mandam explicar em caso de erro. Severidade proposta (medium) mantida."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "adicionar_itens pode retornar sucesso=True junto com erro, com itens já gravados num carrinho que não fecha",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "line": 130,
+      "description": "A linha 122 precifica apenas os itens novos; depois de salvar, _resumo re-precifica o carrinho INTEIRO. Se um item antigo ficou inválido entre turnos (ex.: item de café da manhã com janela 07:00-11:00 adicionado às 10:55, e o cliente adiciona um refrigerante às 11:05), _resumo retorna {'erro': ...} e o código sobrepõe sucesso=True e mensagem 'Itens adicionados. Deseja mais alguma coisa...'. O modelo recebe um JSON contraditório (sucesso + erro, sem itens nem subtotal), tende a anunciar sucesso, e o carrinho fica num estado em que revisar/finalizar sempre falham.",
+      "evidence": "resultado = _resumo(cart); resultado[\"sucesso\"] = True; resultado[\"mensagem\"] = \"Itens adicionados...\" — _resumo pode retornar {\"erro\": erro} (linha 75).",
+      "recommendation": "Verificar 'erro' no retorno de _resumo antes de marcar sucesso; se um item antigo ficou indisponível, informar qual e oferecer removê-lo (reforça a necessidade de remover_item).",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Finding CONFIRMADO por execução real do código (relógio mockado via geo.agora). Em /Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py, adicionar_itens valida/precifica apenas os itens novos (linha 122: `pedido.precificar(loja_id, novos)`), salva o carrinho (linha 128) e só então chama _resumo(cart) (linha 130), que re-precifica o carrinho INTEIRO e pode retornar {\"erro\": ...} (linha 75) quando um item antigo saiu da janela de horário (pedido.precificar → geo.item_disponivel, linhas 134-136 de pedido.py). As linhas 131-132 sobrescrevem incondicionalmente com sucesso=True e mensagem \"Itens adicionados...\". Reprodução: item cf01 (Pão na Chapa, janela 07:00-11:00 em cardapio_itens.py) adicionado às 10:55; refrigerante hb01 adicionado às 11:05 retorna exatamente {'erro': 'Pao na Chapa... so esta disponivel das 07:00 as 11:00', 'sucesso': True, 'mensagem': 'Itens adicionados. Deseja mais alguma coisa ou fechar o pedido?'} — sem itens/subtotal. Após isso, ver_carrinho retorna só {'erro': ...} e revisar_pedido/finalizar_pedido sempre falham; como não existe remover_item (só limpar_carrinho), o cliente só recupera descartando o carrinho inteiro. Severidade medium é adequada: exige cruzar uma janela de horário no meio da sessão (cenário plausível numa padaria com itens de café da manhã 07:00-11:00 — são ~9 itens com essa janela), o payload contraditório induz o modelo (Nova Pro) a anunciar sucesso falso, e o carrinho fica travado, mas há recuperação via limpar_carrinho e não há perda financeira (finalizar falha em vez de cobrar errado)."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "Mensagem de loja fechada afirma falsamente que 'nenhuma loja aberta tem esse item'",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "line": 117,
+      "description": "Cenário: segunda-feira à noite, cliente pede a Calabresa (pz02, vendida em A e B) e força a loja A ('quero da Pizzaria Central'). _escolher_loja respeita a forçada mesmo fechada (A fecha segunda), e o bloco de loja fechada devolve o texto fixo 'Esse item so e vendido nela; nenhuma loja aberta agora tem esse item' — falso, a loja B está aberta e vende o item. O agente repassa a informação errada e perde a venda. O mesmo texto enganoso aparece quando o carrinho já tem itens e a loja fechou entre turnos.",
+      "evidence": "_escolher_loja retorna forcada sem checar loja_aberta (linhas 49-52); o erro em adicionar_itens usa string fixa que assume exclusividade do item (linhas 115-119).",
+      "recommendation": "Ao falhar por loja fechada, verificar se outra candidata está aberta e sugerir a troca ('A Pizzaria Central está fechada, mas a Burger Jardins está aberta e tem esses itens'); só usar o texto de exclusividade quando candidatas == 1.",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Reproduzi o cenário executando o código real (lambda/carrinho.py + geo.py + dados.py) com geo.agora mockado para segunda-feira 20h: pz02 (Calabresa) tem lojas ['A','B'], a loja A está fechada na segunda (horarios[0]=[]) e a B está aberta (18h-23h). Forçando loja A, adicionar_itens devolve exatamente o texto fixo 'Esse item so e vendido nela; nenhuma loja aberta agora tem esse item. So da pra pedir quando ela reabrir' — afirmação falsa, pois geo.loja_aberta(LOJAS['B']) retorna True no mesmo instante. O mesmo texto enganoso sai quando o carrinho já está ancorado na loja A e ela fechou. _escolher_loja (linhas 49-52) de fato retorna a loja forçada sem checar abertura, e o bloco das linhas 113-119 nunca consulta as candidatas antes de afirmar exclusividade. Severidade medium é adequada: o caminho sem loja forçada escolhe corretamente a loja aberta (verificado), então o defeito só aparece com loja explicitamente nomeada ou carrinho pré-existente; é desinformação repassada ao cliente que pode perder venda, não corrupção de preço/pedido."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "finalizar_pedido não é idempotente: segunda chamada vira 'Carrinho vazio' e não há como recuperar o pedido",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "line": 192,
+      "description": "O Nova Pro com frequência re-chama a mesma tool ao reformular a resposta. Cenário: finalizar_pedido roda com sucesso (carrinho é apagado), o modelo chama de novo no mesmo turno → {'sucesso': False, 'erro': 'Carrinho vazio'}; o modelo pode então dizer ao cliente que o pedido falhou, logo depois de ele ter sido 'confirmado'. Como nada é persistido (finding crítico), não há como responder 'seu pedido PED-X já foi registrado'.",
+      "evidence": "session_attrs.pop(CHAVE, None) apaga o carrinho e nenhum registro do pedido_id fica em session_attrs ou storage.",
+      "recommendation": "Guardar o último pedido finalizado em session_attrs (ex.: 'ultimo_pedido') e, se finalizar for chamado com carrinho vazio mas houver pedido recente, devolver o mesmo pedido_id com uma flag 'ja_finalizado': true.",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "CONFIRMADO no código. Em /Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py, finalizar_pedido (linhas 180-193) delega a revisar_pedido, gera o pedido_id apenas no dict de resposta (`resultado[\"pedido_id\"] = f\"PED-{uuid.uuid4().hex[:8].upper()}\"`, linha 186) e esvazia o carrinho com `session_attrs.pop(CHAVE, None)` (linha 192). Numa segunda chamada no mesmo turno/sessão, _carregar devolve carrinho vazio e revisar_pedido retorna {\"sucesso\": False, \"erro\": \"Carrinho vazio\"} (linha 152) — exatamente o cenário descrito. Verifiquei também que não existe NENHUM mecanismo de persistência ou registro do pedido no repo: grep por dynamo/boto3/s3/ultimo_pedido/pedido_id em lambda/, *.tf e instructions.txt só encontra a própria linha 186 que gera o id. O handler (lambda/handler.py) devolve session_attrs ao Bedrock sem guardar nada do pedido, e instructions.txt não tem salvaguarda contra re-chamada. Portanto: (1) o pedido_id existe só na resposta daquela invocação; (2) uma re-chamada (comum em modelos como Nova ao reformular resposta, ou o cliente pedindo \"confirma de novo\") recebe erro e pode levar o agente a dizer que o pedido falhou logo após confirmá-lo; (3) não há como responder \"seu pedido PED-X já foi registrado\". A severidade medium é adequada: o gatilho depende de comportamento do modelo (re-chamada dupla), não é falha determinística, e o impacto principal (pedido não persistido em lugar nenhum) já é coberto por um finding crítico separado — aqui o dano incremental é confusão/idempotência. A recomendação de guardar um 'ultimo_pedido' em session_attrs e devolver ja_finalizado=true é viável e correta no design atual."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "Arredondamento float subcobra centavos em salgados por peso",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/pedido.py",
+      "line": 80,
+      "description": "Preço em float + round() do Python produz meio-centavo caindo para o lado errado. Cenário concreto: 250g de Mini Coxinha (sg01, R$59,90/kg — exatamente o pedido mínimo) → 59.90*250/1000 = 14.975, que em binário é 14.9749... e round(...,2) devolve 14.97 em vez de 14.98. Já 350g de Mini Kibe (54.90/kg) dá 19.215 → 19.21. Cada linha desse tipo perde/ganha um centavo de forma imprevisível, e o subtotal soma linhas já arredondadas.",
+      "evidence": "preco = produto[\"preco_por_kg\"] * gramas / 1000; \"subtotal\": round(preco, 2) — verificado: round(59.90*250/1000, 2) == 14.97.",
+      "recommendation": "Trabalhar em centavos inteiros (preco_por_kg_centavos * gramas // 1000 com regra de arredondamento explícita) ou usar decimal.Decimal com quantize(ROUND_HALF_UP) em todo o motor de preços.",
+      "dimension": "carrinho-precos",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código real: lambda/pedido.py linha 80 calcula preço por peso em float (preco_por_kg * gramas / 1000) e arredonda com round(preco, 2) na linha 86; o subtotal (linha 141-142) soma linhas já arredondadas. Dados confirmados em lambda/dados.py: sg01 Mini Coxinha R$59,90/kg com minimo_g=250 e sg02 Mini Kibe R$54,90/kg. Reproduzi em python3: round(59.90*250/1000, 2) == 14.97 (o valor binário é 14.9749999..., então 14.98 seria o correto com ROUND_HALF_UP) e round(54.90*350/1000, 2) == 19.21 em vez de 19.22. O cenário de 250g é exatamente o pedido mínimo do item, portanto plausível no uso normal. O impacto se limita a 1 centavo por linha com direção imprevisível — bug real de precisão monetária, mas de impacto financeiro mínimo, sem efeito em fluxo ou consistência do carrinho. Severidade low mantida; a correção recomendada (centavos inteiros ou decimal.Decimal com quantize ROUND_HALF_UP) é adequada."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "Janelas de horário que cruzam a meia-noite nunca funcionam (loja fica 'sempre fechada')",
+      "file": "lambda/geo.py",
+      "line": 33,
+      "description": "loja_aberta compara _minutos(abre) <= atual <= _minutos(fecha). Se uma faixa cruzar a meia-noite (ex.: pizzaria das 18:00 às 02:00), _minutos('18:00')=1080 > _minutos('02:00')=120 e a condição é falsa para QUALQUER horário — a loja fica permanentemente fechada naquela faixa. Hoje o dado contorna isso com ('18:00','23:59') na loja A, mas o horario_texto promete 'das 18h as 24h' (dados.py:69): às 00:00 em ponto a loja já consta fechada (atual=0, e o weekday() vira o dia seguinte, então nem a faixa do dia anterior é consultada) e adicionar_itens/finalizar_pedido são recusados um minuto antes do prometido ao cliente. Para o objetivo declarado do dono (padaria/pizzaria com lojas até 24h/02h), qualquer loja nova com fechamento após a meia-noite quebra silenciosamente. Verificado: loja_aberta(LOJAS['A'], sábado 00:10) == False.",
+      "evidence": "return any(_minutos(abre) <= atual <= _minutos(fecha) for abre, fecha in faixas)  # geo.py:33; dados.py:69: \"horario_texto\": \"Terca a domingo, das 18h as 24h\" com faixas ('18:00','23:59')",
+      "recommendation": "Tratar fecha < abre como janela que cruza a meia-noite: quando _minutos(fecha) < _minutos(abre), considerar aberto se atual >= abre OU atual <= fecha, e nesse caso também verificar as faixas do dia anterior (weekday()-1) para o trecho da madrugada. Alinhar o dado da loja A ('24:00' → faixa até '00:00' do dia seguinte) com o texto.",
+      "dimension": "geo-horarios",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Confirmado por execução: em geo.py:33, `_minutos(abre) <= atual <= _minutos(fecha)` nunca é verdadeiro quando fecha < abre — testei uma faixa ('18:00','02:00') e loja_aberta retorna False inclusive às 19:00 (dentro da janela), então qualquer loja com fechamento após a meia-noite fica permanentemente fechada, de forma silenciosa. Também confirmado o caso concreto atual: loja A (faixas '18:00'–'23:59', dados.py:72-77) está aberta sábado 23:59 e fechada domingo 00:00, enquanto horario_texto (dados.py:69) promete \"das 18h as 24h\" — o weekday() do dia seguinte tem faixa própria mas o trecho da madrugada nunca é coberto. O finding é real. Severidade ajustada de high para medium porque, no código como está, nenhuma loja cadastrada usa faixa que cruza a meia-noite (o dado contorna com 23:59) e o impacto presente é de 1 minuto por dia; a quebra grave é latente e só se manifesta ao cadastrar lojas com fechamento pós-meia-noite — cenário relevante para o objetivo do dono (lojas até 24h/02h), mas ainda não exercitado. A recomendação do finding (tratar fecha < abre como janela que cruza a meia-noite e consultar as faixas do dia anterior para a madrugada) é adequada."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Queda/timeout do ViaCEP bloqueia TODOS os pedidos com mensagem enganosa 'CEP nao encontrado'",
+      "file": "lambda/geo.py",
+      "line": 80,
+      "description": "_get_json engole qualquer exceção (timeout de 5s, DNS, HTTP 500, rate limit do ViaCEP) e devolve None; consultar_cep então retorna {'valido': False, 'erro': 'CEP nao encontrado'} — indistinguível de um CEP realmente inexistente. Cenário concreto: ViaCEP fora do ar no horário de pico → revisar_pedido e finalizar_pedido (carrinho.py:159-161) falham para todo cliente, nenhum pedido fecha em nenhuma loja, e o agente ainda informa ao cliente que o CEP dele 'não foi encontrado', induzindo-o a redigitar um CEP correto em loop. Não há retry nem fallback (o frete é fixo por loja e não depende do endereço, então a validação online nem é essencial para precificar).",
+      "evidence": "except Exception:\n        return None  # geo.py:54-55; geo.py:80: return {\"valido\": False, \"erro\": \"CEP nao encontrado\"}",
+      "recommendation": "Distinguir falha de serviço de CEP inválido: se _get_json devolver None, retornar algo como {'valido': True, 'endereco': None, 'aviso': 'validacao de endereco indisponivel'} (formato do CEP já foi validado) ou ao menos um erro honesto 'servico de CEP indisponivel, tente novamente'. Considerar 1 retry curto.",
+      "dimension": "geo-horarios",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Confirmado no código: geo.py:54-55 engole qualquer exceção de rede em _get_json e devolve None; geo.py:80 então converte essa falha de serviço em {\"valido\": False, \"erro\": \"CEP nao encontrado\"}, indistinguível de CEP inexistente. carrinho.py:159-161 (revisar_pedido) aborta com esse erro e finalizar_pedido (carrinho.py:180-184) apenas delega a revisar_pedido — logo, com ViaCEP fora do ar/timeout/rate-limit, nenhum pedido revisa ou fecha em nenhuma loja, e o cliente recebe a mensagem enganosa de que o CEP dele não existe (loop de redigitação). Também se confirma que a consulta online é dispensável para precificar: frete_da_loja (geo.py:85-88) usa apenas frete fixo da loja e subtotal; o endereço do ViaCEP só é exibido no resumo. Não há retry nem fallback. Severidade high mantida: dependência rígida de serviço gratuito sem SLA no caminho crítico de checkout, bloqueio total temporário + diagnóstico incorreto ao cliente; não é critical porque o impacto é transitório e sem corrupção de estado."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Nenhuma validação de área de entrega: CEP de Manaus é aceito para entrega de loja em SP com frete de R$ 6",
+      "file": "lambda/geo.py",
+      "line": 58,
+      "description": "consultar_cep só valida que o CEP existe no ViaCEP; revisar_pedido/finalizar_pedido usam o endereço apenas para exibição e frete_da_loja ignora completamente o endereço (frete fixo por loja). Cenário concreto verificado: cliente informa CEP 69005-070 (Centro de Manaus/AM) → {'valido': True, cidade: 'Manaus', uf: 'AM'} e o pedido é finalizado na Pizzaria Central (Av. Paulista, SP) com frete de R$ 6,00. O pedido é registrado como entregável a ~2.700 km da loja. Para o objetivo de múltiplas lojas, também não há escolha de loja pela proximidade do CEP.",
+      "evidence": "Executado: geo.consultar_cep('69005-070') → {'valido': True, 'endereco': {..., 'cidade': 'Manaus', 'uf': 'AM'}}; frete_da_loja(loja, subtotal) não recebe endereço (geo.py:85-88)",
+      "recommendation": "Após consultar o ViaCEP, validar ao menos cidade/UF contra a loja (ex.: uf == 'SP' e localidade == 'Sao Paulo') ou uma lista de prefixos de CEP atendidos por loja, retornando erro claro 'fora da area de entrega'. Futuramente, usar o CEP para sugerir a loja mais próxima.",
+      "dimension": "geo-horarios",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Confirmado no código. geo.consultar_cep (geo.py:58-80) valida só formato e existência do CEP no ViaCEP, retornando cidade/UF sem qualquer comparação com a loja. frete_da_loja (geo.py:85-88) tem assinatura frete_da_loja(loja, subtotal) — não recebe endereço; frete é fixo por loja. Em carrinho.py, revisar_pedido (linhas 159-161) só checa endereco.get('valido') e usa o endereço apenas para exibição em 'endereco_entrega'; finalizar_pedido (180-193) delega a revisar_pedido e registra o pedido. Logo, qualquer CEP brasileiro válido (ex.: Manaus/AM) fecha pedido na loja da Av. Paulista/SP com frete de R$ 6,00 (dados.py:67,79). Não há mitigação nem no prompt (instructions.txt) nem no schema (agent.tf) — nenhuma menção a área de entrega. O gap secundário também procede: _escolher_loja (carrinho.py:39-54) escolhe loja só por disponibilidade de itens/loja aberta, sem usar o CEP. Severidade high mantida: para o objetivo declarado de atendente multi-loja, aceitar entregas impossíveis de cumprir é falha funcional central, mas não corrompe dados nem afeta pedidos legítimos (não é critical)."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "consultar_cardapio com filtro de loja calcula disponivel_agora usando as OUTRAS lojas",
+      "file": "lambda/handler.py",
+      "line": 37,
+      "description": "Quando o usuário pede o cardápio de uma loja específica (param 'loja'), a flag disponivel_agora ainda usa any(loja_aberta) sobre TODAS as lojas do item, não a loja filtrada. Cenário concreto verificado: terça 10:00, consultar_cardapio(categoria='bebidas', loja='A') — loja A (pizzaria, abre 18h) está fechada, mas como as bebidas também existem na loja B (aberta), todos os itens voltam disponivel_agora=True. O agente afirma ao cliente que pode pedir bebidas na Pizzaria Central agora; adicionar_itens depois recusa ('loja fechada'), gerando contradição na conversa. O texto de obs_disponibilidade (linhas 50-52) tem o mesmo problema: lista todas as lojas do item mesmo com filtro ativo.",
+      "evidence": "loja_aberta = any(geo.loja_aberta(LOJAS[l]) for l in it[\"lojas\"])  # handler.py:37 — ignora loja_id; reproduzido: itens ['A','B'] com disponivel_agora=True sob filtro loja='A' fechada",
+      "recommendation": "Quando loja_id estiver presente, usar geo.loja_aberta(LOJAS[loja_id]) e restringir obs_disponibilidade/lojas exibidas à loja filtrada.",
+      "dimension": "geo-horarios",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "CONFIRMADO por leitura do código e reprodução executável. Em /Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/handler.py:37, `loja_aberta = any(geo.loja_aberta(LOJAS[l]) for l in it[\"lojas\"])` ignora completamente o `loja_id` extraído na linha 19 — o filtro de loja só é usado para excluir itens que a loja não vende (linha 33), nunca no cálculo de `disponivel_agora`. Reproduzi o cenário exato com hora simulada (terça 10:00, fuso America/Sao_Paulo): loja A (Pizzaria Central, abre 18h) fechada, loja B aberta; `consultar_cardapio(categoria='bebidas', loja='A')` retornou 13 itens, TODOS com `disponivel_agora=True` (bb01..bb13, lojas ['A','B']). Em seguida `adicionar_itens('bb01|1', loja='A')` na mesma hora simulada recusou com \"A Pizzaria Central esta fechada agora... So da pra pedir quando ela reabrir\" (carrinho.py:114-119 valida corretamente a loja escolhida). A contradição na conversa se sustenta ponta a ponta: o cardápio diz \"disponível agora\" e o carrinho recusa logo depois. O ponto secundário sobre obs_disponibilidade (handler.py:50-52) também procede: quando o item está indisponível, o texto lista TODAS as lojas do item (\"vendido so na X; Y\") mesmo com filtro de loja ativo, embora só se manifeste quando todas as lojas estão fechadas. Severidade medium é adequada: gera informação incorreta e conversa contraditória para o cliente (ruim para um atendente multi-loja onde horários divergentes entre lojas são a norma), mas não há corrupção de dados nem cobrança errada — a validação do carrinho impede o pedido inválido. A correção sugerida (usar geo.loja_aberta(LOJAS[loja_id]) quando o filtro estiver presente e restringir lojas/obs à loja filtrada) é correta e localizada."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "KeyError se algum parâmetro do Bedrock vier sem a chave 'value' — Lambda inteira falha",
+      "file": "lambda/handler.py",
+      "line": 87,
+      "description": "params = {p['name']: p['value'] ...} acessa 'value' sem .get(). O contrato do Bedrock Agents normalmente inclui 'value', mas modelos (especialmente Nova) ocasionalmente emitem parâmetro com valor vazio/omitido, e qualquer variação nesse payload derruba a invocação inteira com KeyError não tratado — o Bedrock recebe falha do action group e o agente responde erro genérico ao cliente, em vez de a função tratar o parâmetro ausente (todas já toleram string vazia via params.get(...)). O mesmo vale para p['name'].",
+      "evidence": "params = {p[\"name\"]: p[\"value\"] for p in event.get(\"parameters\", [])}  # handler.py:87",
+      "recommendation": "Usar p.get(\"value\", \"\") (e p.get(\"name\")) e ignorar entradas sem nome; opcionalmente envolver o dispatch em try/except devolvendo {'erro': ...} para o agente poder se recuperar na conversa.",
+      "dimension": "geo-horarios",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código: /Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/handler.py:87 usa p[\"name\"]/p[\"value\"] sem .get(), sem nenhum try/except no handler — um KeyError ali derrubaria a invocação inteira. Também confirmado que todas as funções downstream usam params.get() (nenhum indexamento direto de params), então a fragilidade está isolada nessa linha. PORÉM o gatilho é especulativo: o evento é construído pelo serviço Bedrock Agents, cujo contrato para function schema sempre inclui name/type/value; parâmetro opcional omitido pelo modelo simplesmente não aparece na lista (caso já tratado), e valor vazio chega como value:\"\" (sem KeyError). Não existe caminho no repo nem no contrato documentado que produza entrada sem a chave 'value'. Impacto hipotético é apenas erro genérico na conversa, sem corrupção de estado (crash antes de mutar sessionAttributes). É hardening defensivo legítimo e barato na fronteira de entrada (saída de modelo Nova é não-determinística), mas sem cenário de falha demonstrável — severidade rebaixada de medium para low."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "item_disponivel tem a mesma limitação de janela que cruza a meia-noite",
+      "file": "lambda/geo.py",
+      "line": 43,
+      "description": "Mesma comparação linear de loja_aberta: um item noturno (ex.: 'pizza da madrugada' das 22:00 às 02:00, plausível no objetivo do dono) com disponivel_de='22:00'/disponivel_ate='02:00' nunca seria disponível (1320 <= atual <= 120 é sempre falso), e precificar (pedido.py:134) recusaria o item em qualquer horário. Hoje só existe a janela 07:00–11:00 (café da manhã), então o bug está latente, não ativo.",
+      "evidence": "return _minutos(de) <= atual <= _minutos(ate)  # geo.py:43; única janela atual nos dados: ('07:00','11:00')",
+      "recommendation": "Aplicar a mesma correção de janela cruzando meia-noite proposta para loja_aberta (se ate < de: atual >= de or atual <= ate).",
+      "dimension": "geo-horarios",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código real: lambda/geo.py:43 usa `_minutos(de) <= atual <= _minutos(ate)`, comparação linear que retorna False para qualquer horário quando a janela cruza a meia-noite (ex.: de='22:00'→1320, ate='02:00'→120: às 23:00 dá 1320<=1380<=120 falso; à 01:00 dá 1320<=60 falso). pedido.py:134 chama geo.item_disponivel e recusaria o item em precificar com mensagem contraditória (\"só está disponível das 22:00 às 02:00\") em qualquer horário. Porém, todas as janelas atuais nos dados (lambda/cardapio_itens.py) são '07:00'–'11:00', então o bug é latente, não ativo — exatamente como o finding descreve. É o mesmo padrão defeituoso de loja_aberta (geo.py:33) e relevante para o objetivo de padaria multi-loja com itens com janelas variadas, mas sem dado que o ative hoje, severidade low é adequada."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "Filtro 'loja' inválido em consultar_cardapio retorna cardápio vazio sem erro",
+      "file": "lambda/handler.py",
+      "line": 33,
+      "description": "loja_id não é validado contra LOJAS (diferente de adicionar_itens, que valida). Se o modelo passar o nome em vez do id (loja='Pizzaria Central' → 'PIZZARIA CENTRAL') ou 'C', nenhum item casa com it['lojas'] e a resposta é {'quantidade': 0, 'itens': []} — o agente conclui e informa que a categoria não tem itens naquela loja, quando na verdade o parâmetro estava errado.",
+      "evidence": "loja_id = (params.get(\"loja\") or \"\").strip().upper() or None  # handler.py:19, usado direto em handler.py:33 sem checar 'loja_id in LOJAS'",
+      "recommendation": "Se loja_id for informado e não estiver em LOJAS, retornar {'erro': 'Loja invalida. Use A ou B.'} como faz carrinho.adicionar_itens.",
+      "dimension": "geo-horarios",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código. Em lambda/handler.py:19 o parâmetro 'loja' é apenas normalizado (strip().upper()) sem checagem contra LOJAS (chaves \"A\"/\"B\" em lambda/dados.py). Na linha 33, qualquer loja_id inválido (\"PIZZARIA CENTRAL\", \"C\") faz todos os itens serem filtrados, e a função retorna {\"quantidade\": 0, \"itens\": []} sem campo de erro — o agente informará ao cliente que a categoria não existe naquela loja, quando o problema foi parâmetro malformado. O contraste alegado também é real: carrinho.adicionar_itens valida exatamente isso (carrinho.py:94-95, retorna \"Loja invalida. Escolha A ou B.\"), evidenciando inconsistência dentro do próprio repo. Mitigação parcial: o schema em agent.tf:37 descreve o parâmetro como \"loja A ou B\" (mas não é enum, e o modelo Nova pode passar o nome da loja). Severidade low mantida: bug real de robustez com resposta silenciosamente errada ao cliente, porém condicionado a erro do modelo e com correção trivial de uma linha."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "Payload de consultar_cardapio hoje é seguro (~7 KB no pior caso), mas cresce linearmente com o cardápio planejado",
+      "file": "lambda/handler.py",
+      "line": 69,
+      "description": "Medição real por categoria (JSON UTF-8 do retorno): pizzas 20 itens = 6.968 bytes (maior), combos 10 = 3.484, hamburgueres 15 = 2.905, bebidas 15 = 2.739, demais < 2.8 KB — todas bem abaixo do limite de ~25 KB do corpo de resposta de action group do Bedrock. Risco é futuro: ~350 bytes/item nas pizzas significa que uma categoria com ~70 itens (plausível na expansão para 'atendente completo de padaria com várias lojas') estoura o limite e o Bedrock devolve erro de dependência, quebrando a consulta de cardápio inteira daquela categoria.",
+      "evidence": "Medido em runtime: len(json.dumps(consultar_cardapio({'categoria':'pizzas'}), ensure_ascii=False).encode()) == 6968; contagem em cardapio_itens.py: pizzas 20, hamburgueres 15, bebidas 15, combos 10, sobremesas 10, porcoes 10, massas 8, cafe_da_manha 8, japonesa 8, saladas 6 (+8 salgados em dados.py)",
+      "recommendation": "Antes de ampliar o cardápio, adicionar paginação ou truncamento (ex.: máx. ~40 itens por resposta com campo 'proxima_pagina'), e/ou encurtar campos (omitir descricao quando a lista for longa).",
+      "dimension": "geo-horarios",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Verificado no código real: consultar_cardapio (lambda/handler.py:69) retorna todos os itens da categoria sem paginação/truncamento. As medições do finding se reproduzem exatamente (pizzas 20 itens = 6.968 bytes; contagens por categoria conferem em cardapio_itens.py e dados.py). O pior caso é até maior que o medido no finding: com lojas fechadas, cada item ganha obs_disponibilidade e pizzas chegam a 8.018 bytes (~401–449 bytes/item nas categorias mais verbosas), então o limite de ~25 KB do corpo de resposta de action group do Bedrock seria estourado com ~55–70 itens numa categoria — plausível na expansão planejada para padaria multi-loja (~118 itens já existem no repo). Porém hoje há folga de ~3x e nenhuma falha ocorre no código como está; é um gap arquitetural condicional a crescimento futuro. Severidade low está correta."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "Categoria 'salgados' ausente na descrição do parâmetro 'categoria' em agent.tf",
+      "file": "agent.tf",
+      "line": 30,
+      "description": "Conferindo uma a uma: a descrição lista pizzas, hamburgueres, combos, porcoes, massas, japonesa, saladas, cafe_da_manha, bebidas e sobremesas (10 categorias), mas CATEGORIAS em dados.py tem 11 — 'salgados' ficou de fora. O modelo trata essa lista como um enum de fato. Cenário concreto: cliente pergunta 'vocês têm coxinha?'; o Nova Pro consulta a lista de categorias do schema, não vê 'salgados', chuta 'porcoes' (retorna sem coxinha) e responde que não tem — sendo que sg01 Mini Coxinha existe nas duas lojas. A ironia: a descrição de adicionar_itens até ensina a pedir salgado por gramas ('sg01|500'), mas o modelo nunca descobre os ids sg* pelo caminho oficial (instructions.txt manda confirmar o id via consultar_cardapio na categoria certa antes de adicionar).",
+      "evidence": "agent.tf:30 — \"Categoria: pizzas, hamburgueres, combos, porcoes, massas, japonesa, saladas, cafe_da_manha, bebidas ou sobremesas\" vs dados.py:48-60 — CATEGORIAS inclui \"salgados\": \"Salgados (por kg)\". cardapio_itens.py tem 10 categorias (110 itens) e os 8 salgados vêm só de dados.py.",
+      "recommendation": "Adicionar 'salgados' à descrição do parâmetro em agent.tf (e considerar gerar essa lista a partir de CATEGORIAS via templatefile/locals no Terraform para nunca mais divergirem). Depois, terraform apply + replace do alias.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "A divergência é real: agent.tf:30 lista 10 categorias e dados.py:48-60 tem 11 — 'salgados' ficou de fora da descrição do parâmetro. Porém o cenário de falha está exagerado. A alegação central (\"o modelo nunca descobre os ids sg* pelo caminho oficial\") é falsa: (1) consultar_cardapio SEM categoria (handler.py:15-24) retorna as 11 categorias incluindo 'salgados', e instructions.txt:25 instrui o modelo a usar exatamente esse caminho para se situar; (2) instructions.txt:32 nomeia a categoria textualmente — \"Salgados (categoria salgados) são vendidos por kg... ex.: sg01|500\" — ou seja, a chave 'salgados' e até um id sg* estão no system prompt em toda conversa; (3) handler.py:26-27 retorna a lista completa de categorias válidas quando o modelo erra a categoria. O risco residual existe (Nova Pro pode tratar a descrição do schema como enum e ignorar o prompt em conversas longas) e a dupla fonte de verdade é um bug de manutenção legítimo com fix trivial, mas 'high' pressupõe que o modelo ignore duas menções explícitas no próprio prompt mais o caminho de listagem. Severidade ajustada para low."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Campo 'obs' aparece na ordem dos campos mas não é documentado em agent.tf — e erro de posição perde a observação em silêncio",
+      "file": "agent.tf",
+      "line": 61,
+      "description": "A descrição de 'itens' cita a ordem id|qtd|tamanho|borda|meio_a_meio|obs, mas nunca explica o que é 'obs' (observação por item, texto livre) nem dá exemplo com ele — nenhum dos 4 exemplos da descrição usa obs; a frase seguinte só explica tamanho/borda/meio_a_meio ('sao so para pizza'). Para um item não-pizza com observação, o modelo precisa produzir 'hb01|1||||sem cebola' (4 campos vazios). Cenário concreto: cliente pede 'um X-Bacon sem cebola'; o Nova Pro, sem exemplo, tende a mandar 'hb01|1|sem cebola' — parse_itens grava 'sem cebola' como tamanho, _monta_linha ignora tamanho para não-pizza, e o item entra no carrinho SEM a observação, sem nenhum erro. A cozinha nunca vê o 'sem cebola' (grave se for restrição alimentar), e o agente ainda confirma o pedido como se estivesse certo.",
+      "evidence": "agent.tf:61 explica tamanho/borda/meio_a_meio e gramas, mas não obs; exemplos 'bb05|3 ; hb01|2 ; pz04|1|grande|catupiry|pz01 ; sg01|500' sem obs. pedido.py:29-36: campos[2] vira 'tamanho' e campos[5] vira 'obs'; pedido.py:106-108: para tipo comum o tamanho é descartado sem validação.",
+      "recommendation": "Documentar obs na descrição do parâmetro com exemplo explícito ('hb01|1||||sem cebola') — igual ao docstring de pedido.parse_itens, que já tem exemplo com obs. No código, rejeitar (ou realocar para obs) tamanho/borda informados para item que não é pizza, em vez de descartar em silêncio.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Finding confirmado no código real e reproduzido com python3. (1) agent.tf:61: a descrição do parâmetro 'itens' cita 'obs' na ordem dos campos mas nunca o explica — a frase seguinte só cobre tamanho/borda/meio_a_meio ('sao so para pizza') — e nenhum dos 4 exemplos usa obs nem mostra o padding de campos vazios ('||||') necessário para item não-pizza. instructions.txt:30 repete o formato também sem exemplo de obs (a linha 32 só diz 'Anote observações por item (obs)', sem mostrar como). O único exemplo com obs está no docstring de pedido.parse_itens, invisível ao modelo. (2) Execução real: parse_itens('hb01|1|sem cebola') → {'id':'hb01','qtd':1,'tamanho':'sem cebola'}; hb01 é tipo 'simples' e _monta_linha (pedido.py:106-108) nunca lê 'tamanho' para não-pizza — a linha entra no carrinho SEM obs e SEM erro. Com o formato correto 'hb01|1||||sem cebola' a obs é preservada. Não há validação que rejeite tamanho/borda em item não-pizza; o descarte é 100% silencioso e o agente confirma o pedido como correto. Severidade high mantida: o gatilho depende de o modelo malformatar, mas o runtime é Nova Pro (fraco em formatos posicionais estritos), não existe nenhum exemplo do padding em nada que o modelo vê, e a consequência é perda silenciosa de observação por item (ex.: restrição alimentar 'sem cebola') num fluxo de pedido voltado ao cliente — a cozinha nunca vê a observação e ninguém percebe o erro. A recomendação do finding (documentar obs com exemplo 'hb01|1||||sem cebola' em agent.tf e instructions.txt, e no código realocar/rejeitar tamanho informado para item não-pizza em vez de descartar) é adequada."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "idle_session_ttl_in_seconds = 600: o carrinho evapora após 10 minutos de silêncio",
+      "file": "agent.tf",
+      "line": 6,
+      "description": "O carrinho vive exclusivamente em sessionAttributes, e a sessão do Bedrock expira após 10 min sem mensagem. Cenário concreto e cotidiano para um atendente de padaria: cliente monta carrinho com 2 pizzas e 500g de coxinha, vai perguntar pra família qual borda, volta 12 minutos depois e diz 'pode fechar, CEP 01310-100'. A sessão expirou: sessionAttributes e histórico sumiram, revisar_pedido retorna 'Carrinho vazio', e o agente ainda cumprimenta de novo como se fosse conversa nova. Para o objetivo declarado (atendente completo de padaria, provavelmente via WhatsApp onde pausas de 10+ min são a norma), esse TTL torna o produto quase inutilizável.",
+      "evidence": "agent.tf:6 — idle_session_ttl_in_seconds = 600. carrinho.py:57-64 — _carregar devolve {\"loja\": None, \"itens\": []} quando a chave não existe; não há nenhum outro armazenamento.",
+      "recommendation": "Subir o TTL para o máximo (o CreateAgent aceita até 5400s = 90 min) como paliativo, e — para o atendente real — persistir o carrinho fora da sessão (DynamoDB keyed por identificador estável do cliente, ex. telefone), usando sessionAttributes só como cache/ponteiro.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Confirmado em código: agent.tf:6 define idle_session_ttl_in_seconds = 600, e o carrinho vive exclusivamente em sessionAttributes (carrinho.py:57-68 via _carregar/_salvar; handler.py:88,116 apenas repassa o dict ao Bedrock). Grep em todo o repo não encontrou nenhuma persistência externa (DynamoDB/S3/Redis inexistentes; o único boto3 é o cliente de teste invoke.py). Simulação local com sessionAttributes vazio — exatamente o estado que o Bedrock entrega após a sessão idle expirar — reproduz o cenário: ver_carrinho retorna \"carrinho vazio\" e revisar_pedido falha com \"Carrinho vazio\", sem qualquer aviso de que havia um carrinho antes. A recomendação também é tecnicamente correta: o CreateAgent aceita idleSessionTTLInSeconds até 5400s, então subir o TTL é paliativo e a solução real é persistir o carrinho fora da sessão. Severidade high mantida: para o objetivo declarado de atendente completo de padaria (conversas assíncronas onde pausas de 10+ min são rotina), a perda silenciosa do carrinho no fluxo central de venda é um defeito grave de produto — mas não critical, pois não há corrupção de dados nem cobrança errada, apenas perda de estado que força o cliente a recomeçar."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "finalizar_pedido não registra o pedido em lugar nenhum — o 'número do pedido' é fictício",
+      "file": "lambda/carrinho.py",
+      "line": 186,
+      "description": "O schema (agent.tf:90) e o README prometem que finalizar_pedido 'registra o pedido e gera o numero', e as instructions mandam informar o número ao cliente. Mas a função só gera um uuid, limpa o carrinho e devolve o resumo — nada é gravado (sem DynamoDB, sem SQS, sem log estruturado). Cenário concreto: cliente confirma, recebe 'Pedido PED-3F2A91BC confirmado, total R$ 104,80', e a loja nunca fica sabendo; se o cliente ligar perguntando pelo PED-3F2A91BC, ele não existe em sistema algum. Para evoluir a atendente real, este é o gap funcional mais grave depois do TTL.",
+      "evidence": "carrinho.py:186 — resultado[\"pedido_id\"] = f\"PED-{uuid.uuid4().hex[:8].upper()}\" seguido apenas de session_attrs.pop(CHAVE, None) e return; nenhuma escrita externa em todo o módulo.",
+      "recommendation": "Persistir o pedido (DynamoDB é o caminho natural: pedido_id como PK, TTL opcional) e/ou publicar em fila/notificação para a loja antes de devolver o número ao cliente. Enquanto não existir, ajustar as descrições para não prometer 'registro'.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "CONFIRMADO. lambda/carrinho.py:186 gera apenas `PED-{uuid.uuid4().hex[:8].upper()}`, limpa o carrinho (linha 192) e retorna — não há nenhuma escrita externa: grep por boto3/dynamodb/sqs/sns/put_item/s3/eventbridge em todo o repo só encontra invoke.py (cliente de teste). Não existe tabela, fila nem permissão IAM para persistência (iam.tf só tem a role do agente e lambda_basic), e handler.py não tem sequer print/logger do pedido finalizado. A promessa de registro está explícita em agent.tf:90 ('Registra o pedido a partir do carrinho e gera o numero'), instructions.txt:28 ('registra e gera o número') e README.md:35 ('revalida e registra') — em contraste deliberado com revisar_pedido ('sem registrar'). O cenário de falha é real: o cliente recebe um número de pedido que não existe em lugar nenhum e a loja nunca fica sabendo. Para o objetivo do dono (atendente completo de padaria multi-loja), é gap arquitetural central; severidade high mantida (não critical por ser protótipo em evolução)."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "consultar_cardapio não valida o parâmetro 'loja': nome de loja ou valor inválido vira cardápio vazio em silêncio",
+      "file": "lambda/handler.py",
+      "line": 33,
+      "description": "adicionar_itens valida a loja ('Loja invalida. Escolha A ou B'), mas consultar_cardapio só faz upper() e filtra por pertencimento a it['lojas']. As instructions proíbem o modelo de usar os códigos A/B com o cliente e o ensinam a falar por nome (Pizzaria Central / Burger Jardins) — exatamente o valor que ele tende a reaproveitar na chamada. Cenário concreto: seguindo o passo do fluxo loja_fechada ('confira com consultar_cardapio na loja aberta'), o modelo chama consultar_cardapio(categoria='pizzas', loja='Burger Jardins'); 'BURGER JARDINS' não está em nenhum it['lojas'], o retorno é {quantidade: 0, itens: []} sem erro, e o agente responde que a loja aberta não tem nenhuma pizza — falso (a B vende 8 sabores).",
+      "evidence": "handler.py:19 — loja_id = (params.get(\"loja\") or \"\").strip().upper() or None; handler.py:33-34 — if loja_id and loja_id not in it[\"lojas\"]: continue — sem verificação loja_id in LOJAS. Compare com carrinho.py:94-95, que valida.",
+      "recommendation": "Em consultar_cardapio, validar loja_id contra LOJAS e devolver erro explícito ('Loja invalida: use A ou B') — ou, melhor, aceitar também os nomes ('pizzaria central' → 'A') já que o prompt força o modelo a pensar por nome.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Confirmado por execução real: consultar_cardapio(categoria='pizzas', loja='Burger Jardins') retorna {quantidade: 0, itens: []} sem campo de erro (idem loja='C'), enquanto loja='B' retorna 5 pizzas. handler.py:19 só faz strip().upper() e handler.py:33-34 filtra por pertencimento a it['lojas'] sem validar contra LOJAS — em contraste com carrinho.py:93-95, que devolve erro explícito 'Loja invalida. Escolha A ou B.'. O cenário de falha é plausível: as instructions (linha 11) forçam o modelo a pensar/falar por nome de loja e o fluxo loja_fechada (linha 17) manda 'conferir com consultar_cardapio na loja aberta'; se o modelo (Nova Pro, instruction-following mais fraco) passar o nome em vez do código, o resultado vazio silencioso o induz a afirmar falsamente que a loja aberta não tem itens da categoria. Atenuante: o schema em agent.tf descreve o parâmetro como 'Filtra itens vendidos na loja A ou B', então o gatilho depende de desvio do modelo, não é determinístico — por isso medium (não high) é a severidade correta. Detalhe menor no finding: a loja B vende 5 pizzas, não 8; não altera o defeito. Correção recomendada válida: validar loja_id contra LOJAS (e idealmente aceitar nomes de loja mapeando para os códigos)."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "instructions.txt promete que 'tudo está em obs_disponibilidade', mas no ramo 'fora da janela' o campo não traz loja nem horário da loja",
+      "file": "instructions.txt",
+      "line": 8,
+      "description": "A instrução manda avisar item indisponível 'sempre citando de qual loja o item é e o HORÁRIO de funcionamento dela (tudo está em obs_disponibilidade)'. Isso só é verdade no ramo loja-fechada. Quando o item está fora da própria janela (ex.: cafe_da_manha às 20h), obs_disponibilidade vem como 'disponivel so das 06:00 as 11:00' — sem nome de loja nem horário dela. Cenário concreto: cliente pede tapioca às 20h; o modelo, instruído a citar loja+horário e sem esses dados no retorno, alucina ('a tapioca é da Pizzaria Central, que abre às 18h') — exatamente o tipo de invenção que o resto do prompt tenta proibir. Nova Pro é particularmente propenso a preencher lacunas assim.",
+      "evidence": "handler.py:46-48 — ramo not na_janela: registro[\"obs_disponibilidade\"] = f\"disponivel so das {it['disponivel_de']} as {it['disponivel_ate']}\" (sem loja); o ramo com loja/horário (linhas 50-52) só roda quando na_janela é True e a loja está fechada.",
+      "recommendation": "Incluir loja e horário também no ramo fora-da-janela do handler (ou afrouxar a instrução: 'cite o horário do item quando for janela do item, e a loja+horário quando for loja fechada').",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Confirmado no código. instructions.txt:8 manda o modelo SEMPRE citar a loja do item e o horário de funcionamento dela ao avisar indisponibilidade, afirmando que \"tudo está em obs_disponibilidade\". Mas handler.py:45-48 mostra que, no ramo `not na_janela` (item fora da própria janela, ex.: café da manhã 07:00-11:00 pedido às 20h — itens com esses campos existem em cardapio_itens.py), obs_disponibilidade vem apenas como \"disponivel so das X as Y\", sem nome de loja e sem horário da loja. O ramo que inclui loja + horario_texto (handler.py:50-52) só roda quando na_janela=True e a loja está fechada. O registro traz \"lojas\" só como códigos A/B, que a instrução linha 11 proíbe expor, e o horário da loja não está no payload desse ramo. Resultado: o prompt exige dados que não existem no retorno e ainda afirma falsamente que existem, o que desencoraja o modelo de chamar listar_lojas e o induz (Nova Pro é propenso a isso) a inventar loja/horário — violando a regra \"nunca invente horário\" do próprio prompt. Severidade medium mantida: causa provável desinformação ao cliente num fluxo específico, mas o modelo pode se recuperar via listar_lojas e a informação essencial (janela do item) está correta no campo; não há quebra funcional. Correções possíveis: incluir loja+horário também no ramo fora-da-janela do handler, ou ajustar a instrução para exigir loja+horário só no caso loja-fechada."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "Fluxo de deploy por -replace do alias gera alias_id novo a cada mudança e quebra clientes/sessões",
+      "file": "agent.tf",
+      "line": 117,
+      "description": "O alias não tem routing_configuration, então só aponta para a versão criada junto com ele; qualquer mudança em prompt/schema/Lambda exige 'terraform apply -replace=aws_bedrockagent_agent_alias.dev', que DESTRÓI e recria o alias — novo agent_alias_id a cada deploy. Cenários concretos: (1) invoke.py tem ALIAS_ID default hardcoded ('M57OUWSDFF') que apodrece no primeiro deploy — quem rodar sem a env var cai em ResourceNotFoundException; (2) sessões em andamento no alias antigo morrem no meio do pedido; (3) é fácil editar instructions.txt, validar no Test do console (que usa DRAFT, já preparado via prepare_agent) e esquecer o replace — o alias 'dev' continua servindo o prompt velho, e o bug 'consertado' segue em produção. O README até documenta a fricção, mas ela é estrutural.",
+      "evidence": "agent.tf:117-123 — alias sem routing_configuration; README:52-56 — 'gere uma versão nova e reaponte o alias (gera um alias_id novo)'; invoke.py:16-17 — defaults hardcoded de AGENT_ID/ALIAS_ID.",
+      "recommendation": "Publicar versão e atualizar o alias in place (aws bedrock-agent update-agent-alias preserva o alias_id; no Terraform, usar routing_configuration com a versão publicada, ou um null_resource/script de release). Remover os defaults hardcoded do invoke.py e falhar com mensagem clara pedindo as env vars.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Finding confirmado no código real. (1) agent.tf:117-123: o alias 'dev' não tem routing_configuration e não referencia nada que mude entre applies — após editar instructions.txt/schema/Lambda, o apply atualiza só o DRAFT e o alias continua servindo a versão antiga em silêncio. (2) O fluxo documentado (README:52-56) é 'terraform apply -replace=aws_bedrockagent_agent_alias.dev', que destrói e recria o alias; o agentAliasId é atribuído pelo serviço na criação, então cada deploy gera um ID novo — o próprio README admite '(gera um alias_id novo)'. Clientes com o ID antigo recebem ResourceNotFoundException e sessões em andamento (carrinho em sessionAttributes) morrem no meio do pedido. (3) invoke.py:16-17 tem defaults hardcoded AGENT_ID='1B0CRSOXZ3' e ALIAS_ID='M57OUWSDFF'; o ALIAS_ID apodrece garantidamente no primeiro replace. (4) O cenário 'validou no Test do console e esqueceu o replace' também se sustenta: prepare_agent=true faz o DRAFT refletir mudanças na hora, enquanto o alias fica para trás. A recomendação é correta (update-agent-alias / routing_configuration preserva o alias_id). Severidade medium é adequada: não é bug de runtime que afeta o cliente hoje (é alias dev de projeto de estudo, com workaround documentado via terraform output), mas é fricção estrutural de deploy que quebra integrações e sessões a cada release — relevante para o objetivo de virar um atendente de produção multi-loja."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "sessionAttributes como único estado: sem cap de tamanho nem tratamento de estouro do carrinho",
+      "file": "lambda/carrinho.py",
+      "line": 68,
+      "description": "_salvar serializa o carrinho inteiro num único atributo de sessão, que trafega em TODA chamada InvokeAgent e em todo payload da Lambda, e está sujeito às quotas de sessionState do Bedrock (limites de tamanho de chave/valor documentados nas service quotas). Cada item ocupa ~60-150 bytes de JSON (mais com obs longa), e nada limita a quantidade de itens nem o tamanho da obs. Cenário concreto: encomenda de festa — 40 itens, vários com observações ('metade sem cebola, embalar separado...') — o atributo passa do limite; o Bedrock rejeita a resposta da Lambda/da sessão com validationException, o turno inteiro falha com erro opaco pro cliente e, dependendo do ponto da falha, o carrinho construído até ali se perde. Como não há nenhum outro armazenamento, não existe degradação graciosa.",
+      "evidence": "carrinho.py:67-68 — session_attrs[CHAVE] = json.dumps(cart, ensure_ascii=False), sem verificação de tamanho; handler.py:116 devolve session_attrs inteiro ao Bedrock em toda resposta; nenhum try/except em torno do fluxo de sessão.",
+      "recommendation": "Impor limites de negócio (máx. de itens por pedido, truncar obs) e verificar len(json) antes de salvar, devolvendo erro amigável ('pedido grande demais, vamos fechar este e abrir outro'). A médio prazo, mover o carrinho para DynamoDB (resolve junto com o TTL) e guardar só um id na sessão.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código: _salvar (lambda/carrinho.py:67-68) serializa o carrinho inteiro num único sessionAttribute sem checagem de tamanho; adicionar_itens (linhas 126-128) não limita a quantidade de itens; parse_itens (lambda/pedido.py:35-36) aceita obs de tamanho arbitrário; handler.py devolve session_attrs inteiro em toda resposta sem try/except; e não existe nenhum outro armazenamento no repo. O gap existe. Porém a severidade está exagerada: (1) um carrinho realista de padaria (2-15 itens) gera centenas de bytes a ~2 KB de JSON, e mesmo o cenário de festa com 40 itens e observações fica em ~6-10 KB — só estoura se a quota do Bedrock for pequena, número que o finding não cita e não pôde ser verificado; (2) a alegação de perda do carrinho acumulado não se sustenta: sessionAttributes só são persistidos quando a resposta da Lambda é aceita, então uma rejeição por tamanho falha o turno mas preserva o estado dos turnos anteriores — perde-se apenas a adição daquele turno; (3) sessionAttributes não vão ao modelo, então não há inflação de prompt/tokens; (4) _carregar já degrada graciosamente JSON corrompido. Resta um gap real de robustez (sem cap de itens, sem truncar obs, falha opaca quando ocorrer) relevante para encomendas grandes, mas de baixa probabilidade e impacto limitado ao turno corrente — severidade low."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "Prompt de 6,6 KB denso em proibições e passos multi-chamada que o Nova Pro tende a pular",
+      "file": "instructions.txt",
+      "line": 15,
+      "description": "O prompt (6.659 bytes, dentro do limite de 20k do Bedrock, mas longo) concentra 6 'NUNCA/Nunca' e vários fluxos condicionais de 3+ passos (ex.: linha 17: detectar loja_fechada → não oferecer o mesmo item → consultar_cardapio na loja aberta → filtrar pela mesma categoria). Modelos da família Nova degradam instruções negativas e cadeias longas conforme o contexto cresce. Riscos concretos: (a) a exigência da linha 15 de SEMPRE confirmar id via consultar_cardapio antes de adicionar dobra as chamadas de tool por turno (latência/custo) e, quando o modelo a pula, ele inventa id — mitigado pela validação 'Item inexistente' da Lambda, mas gera turno extra de correção; (b) há tensão entre a linha 24 ('Só siga o pedido em loja aberta') e a linha 16 ('deixe o adicionar_itens escolher'), que pode induzir chamadas desnecessárias a listar_lojas. Nenhuma categoria/fluxo citado no prompt deixa de existir nas funções (formato de itens, tamanhos broto/media/grande/familia e bordas conferem com pedido.py/dados.py) — o problema é densidade, não referência quebrada.",
+      "evidence": "wc -c instructions.txt = 6659; linhas 9, 11, 15, 18, 23, 32 contêm proibições absolutas; linha 17 descreve fluxo de 4 passos dependente do campo loja_fechada de carrinho.py:115.",
+      "recommendation": "Enxugar: mover regras que a Lambda já garante (id inexistente, loja errada, loja fechada) para fora do prompt — confiar no erro estruturado e instruir apenas 'explique o campo erro ao cliente'. Preferir formulações positivas ('fale das lojas pelo nome') às negativas, e testar o prompt reduzido contra os cenários do fluxo loja_fechada.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Finding confirmado factualmente: instructions.txt tem 6.659 bytes; há 8 (não 6) ocorrências de \"nunca\"; a linha 15 exige consultar_cardapio antes de cada adicionar_itens (dobra chamadas de tool); a linha 17 descreve fluxo de 4 passos dependente de loja_fechada (carrinho.py:115); a tensão entre linhas 24 e 16 existe textualmente; o modelo é Nova Pro (variables.tf default us.amazon.nova-pro-v1:0). A mitigação citada também confere: carrinho.py:91 e pedido.py:131 rejeitam \"Item inexistente\", então id inventado não corrompe estado — custa apenas um turno de correção. Nenhuma referência quebrada: tamanhos e bordas do prompt batem com cardapio_itens.py e dados.py. É um problema real de densidade/robustez de prompt (relevante porque o objetivo é escalar para várias lojas, inflando ainda mais o prompt), mas o cenário de falha é degradação probabilística do modelo com guardas de backend já presentes — sem dano determinístico. Severidade low está correta."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "README contradiz a si mesmo: 'Nova Lite' vs Nova Pro e '5 funções' vs 7",
+      "file": "README.md",
+      "line": 3,
+      "description": "A introdução diz 'Foundation model Amazon Nova Lite', mas a seção Modelo (linha 41) diz que o projeto usa us.amazon.nova-pro-v1:0 justamente porque o Lite falhava em tool use. A tabela de arquitetura (linha 11) diz que agent.tf cria 'as 5 funções', mas o schema tem 7 (e a própria lista numerada do README vai de 1 a 7). Cenário concreto: alguém evoluindo o projeto lê a introdução, assume Nova Lite, e gasta tempo depurando 'regressões' de tool use que na verdade são o comportamento conhecido do Lite descrito mais abaixo; ou audita o schema esperando 5 funções e acha que 2 foram adicionadas sem revisão.",
+      "evidence": "README.md:3 — 'Foundation model **Amazon Nova Lite**' vs README.md:41 — 'var.foundation_model = \"us.amazon.nova-pro-v1:0\"' e 'Começou no Nova Lite... o Nova Pro é confiável'. README.md:11 — 'as 5 funções (schema)' vs 7 blocos functions em agent.tf.",
+      "recommendation": "Corrigir a introdução para Nova Pro e a tabela para 7 funções; idealmente referenciar var.foundation_model em vez de repetir o nome do modelo em prosa.",
+      "dimension": "bedrock-schema",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado lendo o código real. README.md:3 diz \"Foundation model **Amazon Nova Lite**\", enquanto variables.tf:13 define default = \"us.amazon.nova-pro-v1:0\" e o próprio README.md:41 explica a migração do Lite para o Pro por falhas de tool use — a introdução contradiz o restante do documento e o Terraform. README.md:11 diz que agent.tf cria \"as 5 funções (schema)\", mas agent.tf tem exatamente 7 blocos `functions` (consultar_cardapio, listar_lojas, adicionar_itens, ver_carrinho, limpar_carrinho, revisar_pedido, finalizar_pedido) e a própria lista numerada do README vai de 1 a 7. O cenário de confusão para quem evolui o projeto é plausível, mas o impacto é apenas documental (código e infra corretos), então a severidade low proposta está correta — mantida."
+      }
+    },
+    {
+      "severity": "critical",
+      "title": "finalizar_pedido não persiste nada — a loja nunca fica sabendo do pedido",
+      "file": "lambda/carrinho.py",
+      "line": 180,
+      "description": "Hoje `finalizar_pedido` apenas revalida o carrinho, gera um UUID cosmético (`PED-...`), anexa o nome do cliente ao dict de resposta e apaga o carrinho da sessão. O pedido não é gravado em lugar nenhum (nem banco, nem fila, nem log estruturado) e nenhum sistema da loja é notificado. Cenário concreto de falha: o cliente confirma, recebe 'Pedido PED-1A2B3C4D confirmado, total R$ 89,90' — e ninguém na cozinha jamais vê esse pedido; a comida nunca sai. Para um 'atendente completo' isso é o gap mais bloqueante: o produto final (o pedido chegar à loja) simplesmente não existe.",
+      "evidence": "carrinho.py:186-193 — `resultado[\"pedido_id\"] = f\"PED-{uuid.uuid4().hex[:8].upper()}\"` ... `session_attrs.pop(CHAVE, None); return resultado`. Nenhum boto3 no projeto, nenhuma tabela no Terraform (só agent.tf, iam.tf, lambda.tf), e iam.tf dá à Lambda apenas AWSLambdaBasicExecutionRole (só CloudWatch Logs).",
+      "recommendation": "Criar tabela DynamoDB `pedidos` (PK = pedido_id, GSI por loja_id+status e por cliente) e gravar o pedido completo (itens precificados, loja, endereço, total, timestamps) dentro de `finalizar_pedido`. Publicar evento `PedidoCriado` no EventBridge (ou SQS por loja) e notificar a loja via SNS/e-mail/WhatsApp ou um painel simples que consome a fila. Adicionar as permissões `dynamodb:PutItem` e `events:PutEvents` na role da Lambda em iam.tf.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "critical",
+        "reasoning": "Confirmado no código real. lambda/carrinho.py:180-193: finalizar_pedido apenas revalida via revisar_pedido (cujo docstring diz explicitamente \"sem registrar\"), gera pedido_id cosmético com uuid, anexa cliente/observações ao dict de resposta, apaga o carrinho da sessão (session_attrs.pop) e retorna — o docstring até promete \"registra o pedido\", mas nada é gravado. Não há boto3 em nenhum arquivo da Lambda (só em invoke.py, cliente de teste local), não há print/logger estruturado no código da Lambda, e o Terraform (agent.tf, iam.tf, lambda.tf, outputs.tf, variables.tf, versions.tf) não cria DynamoDB/SQS/SNS/EventBridge. iam.tf dá à Lambda apenas AWSLambdaBasicExecutionRole (CloudWatch Logs), ou seja, mesmo com código de persistência não haveria permissão. O cenário de falha é literal: cliente recebe confirmação com PED-XXXX e total, carrinho é esvaziado, e nenhum sistema da loja jamais vê o pedido. Para o objetivo do dono (atendente completo de padaria multi-loja), é o gap mais bloqueante: todo o fluxo culmina num no-op. Severidade critical mantida."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Cardápio, preços e lojas hardcoded em .py — qualquer mudança exige redeploy + republicação do agente",
+      "file": "lambda/cardapio_itens.py",
+      "line": 9,
+      "description": "Os ~110 itens vivem em cardapio_itens.py (831 linhas), mais 8 salgados e as 2 lojas em dados.py (LOJAS, dados.py:63-100). Para mudar o preço do pão de queijo ou fechar a loja mais cedo num sábado, o dono precisa: editar Python → `terraform apply` (re-zipa a Lambda) → `terraform apply -replace` do alias (o README:52-56 confirma). Isso é inviável para uma padaria real, onde preço/estoque/horário mudam diariamente e quem muda não é dev. Também acopla dados a código: erro de sintaxe num preço derruba a Lambda inteira.",
+      "evidence": "cardapio_itens.py: `ITENS = [{'id': 'pz01', ... 'tamanhos': {'broto': 32.9, ...}}]` (831 linhas de dados literais); dados.py:37 `CARDAPIO = ITENS + SALGADOS`; dados.py:103 índice montado no import (`_INDICE = {item[\"id\"]: item for item in CARDAPIO}`).",
+      "recommendation": "Mover itens e lojas para DynamoDB (tabela `catalogo` com PK=loja_id, SK=item_id, e tabela/itens de config da loja) com cache em memória na Lambda (dict módulo-level com TTL de ~60s — o container reusa entre invocações, custo de leitura fica baixo). Manter `get_item()` como interface para o resto do código não mudar. Um seed script carrega o cardápio atual. Assim atualizar preço = um PutItem, sem redeploy e sem republicar o agente.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Finding confirmado no código real. (1) cardapio_itens.py tem exatamente 831 linhas de dados literais (`ITENS = [{'id': 'pz01', ... 'tamanhos': {'broto': 32.9, ...}}]` a partir da linha 9); (2) dados.py:10-35 tem os 8 SALGADOS, dados.py:37 `CARDAPIO = ITENS + SALGADOS`, dados.py:63-100 as 2 LOJAS com horários, frete_base e frete_gratis_acima hardcoded, e dados.py:103 o índice montado no import — um erro de sintaxe em qualquer preço quebra o import e derruba a Lambda inteira (todas as 7 funções do action group); (3) o README:52-56 e :75-77 confirmam o fluxo de mudança: editar Python → `terraform apply` → `terraform apply -replace=aws_bedrockagent_agent_alias.dev`. Única imprecisão menor: como o action group aponta para o ARN não-qualificado da Lambda (agent.tf:18), mudanças só de código/dados da Lambda ($LATEST) valem para o alias já publicado sem o replace — o replace só é obrigatório para schema/instructions; mas o README manda o dono fazer o replace mesmo assim, e o passo `terraform apply` (dev com credenciais, editar Python) já é por si inviável para operação diária de padaria. Para o objetivo declarado (atendente completo de padaria multi-loja, com horários, itens e peculiaridades por loja mudando diariamente por não-devs), dados acoplados a código é um gap arquitetural fundacional que bloqueia estoque, preço dinâmico e horários excepcionais. Severidade high mantida."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Não existe busca de item por nome — 'tem pão de queijo?' obriga o modelo a adivinhar a categoria",
+      "file": "lambda/handler.py",
+      "line": 15,
+      "description": "A única forma de achar um item é `consultar_cardapio(categoria)`, que exige a categoria exata (handler.py:26 rejeita categoria inválida). Quando o cliente pergunta 'tem pão de queijo?' ou 'quero uma coxinha', o Nova Pro precisa (1) adivinhar a categoria certa entre 11, (2) chamar a função, (3) varrer a lista textual procurando o nome. Se adivinhar errado (pão de queijo: cafe_da_manha? salgados? padaria?), ele faz múltiplas chamadas, gasta tokens/latência e — pior — pode alucinar que o item não existe ou inventar um id, exatamente o que instructions.txt:15 proíbe. Numa padaria com centenas de itens e nomes ambíguos, busca por nome é a operação mais frequente do atendimento.",
+      "evidence": "handler.py:26-27 `if categoria not in CATEGORIAS: return {\"erro\": ...}` — filtro é só por `it[\"categoria\"] != categoria` (linha 31); agent.tf:24-40 confirma que o schema só expõe `categoria` e `loja`, sem parâmetro de texto livre.",
+      "recommendation": "Adicionar função `buscar_item(texto, loja?)` no action group: normalização (lower, sem acentos) + match por substring/tokens sobre nome e descrição, retornando os top-N com id, preço e disponibilidade. Com stdlib dá para fazer (difflib.get_close_matches como fallback fuzzy). Quando o catálogo for para DynamoDB e crescer, evoluir para OpenSearch Serverless ou um Bedrock Knowledge Base — mas a função Lambda simples já resolve 90% e deve vir antes.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Confirmado no código: as únicas 7 funções do action group (handler.py:90-105, agent.tf function_schema) não incluem nenhuma busca por texto livre; consultar_cardapio exige categoria exata (handler.py:26-27) e filtra por igualdade (handler.py:31). Grep por buscar/difflib/normalização não encontra nada no repo. O catálogo real tem 118 itens em 11 categorias e o cenário do finding é verificável: 'Pao de Queijo Mineiro' está em cafe_da_manha (cf06) enquanto 'Bolinha de Queijo' e 'Mini Coxinha de Frango' estão em salgados — nomes ambíguos entre categorias existem de fato. Agravante descoberto na verificação: a descrição do parâmetro categoria em agent.tf:30 omite a categoria 'salgados' (lista só 10 das 11), então o modelo nem sabe pelo schema que a categoria da coxinha existe. Mitigação parcial: chamar consultar_cardapio sem categoria lista as 11 categorias (handler.py:21-25), dando um caminho de recuperação, mas ao custo de 2+ chamadas por consulta e dependendo do Nova Pro varrer listas sem alucinar ids. Para o objetivo de atendente completo de padaria multi-loja, busca por nome é a operação mais frequente do atendimento e sua ausência é gap arquitetural real. Severidade high mantida."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Peculiaridades de item são hardcoded para pizza — o modelo de dados não generaliza para padaria",
+      "file": "lambda/pedido.py",
+      "line": 12,
+      "description": "Só existem 4 tipos de item (pizza, combo, peso e 'default'), e as variações — tamanho, borda, meio_a_meio — são campos posicionais fixos do formato pipe (`id|qtd|tamanho|borda|meio_a_meio|obs`, pedido.py:12-38) e ramificações if/elif em `_monta_linha` (pedido.py:92-108). BORDAS é um dict global único (dados.py:40-45), igual para todas as lojas. Para padaria isso não expressa: pão fatiado vs. inteiro, bolo por kg vs. fatia, recheio de bolo sob encomenda, adicionais em lanche (ovo, bacon), ponto de assado, torrada ou não. Cada nova peculiaridade hoje = novo campo posicional no schema do agente (republicar alias), novo parsing e novo if no motor de preços — cresce linearmente em código e quebra compatibilidade do formato.",
+      "evidence": "pedido.py:29-36 — campos 2/3/4 do split são interpretados como tamanho/borda/meio_a_meio incondicionalmente, mesmo para itens não-pizza (um 'obs' na posição errada vira 'tamanho' silenciosamente ignorado ou erro); pedido.py:97-99 `borda = ...; if borda not in BORDAS: return None, ...` — bordas são conceito global, não por item/loja.",
+      "recommendation": "Modelar item com lista genérica de `modificadores` (ex.: `{grupo: 'fatiamento', opcoes: {'inteiro': 0, 'fatiado': 0}, obrigatorio: true}` e `{grupo: 'adicionais', opcoes: {...}, multiplos: true}`), com preço-delta por opção, definidos por item no catálogo (DynamoDB). Pizza vira caso particular (grupo 'tamanho' obrigatório + 'borda' + regra especial meio-a-meio). No parâmetro `itens`, trocar posições fixas por pares chave=valor (`id|qtd|tamanho=grande|borda=catupiry|obs=...`) — mais robusto para o modelo e extensível sem mudar o schema. O motor de preços passa a somar base + deltas dos modificadores validados contra o catálogo, num único caminho de código testável.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Finding confirmado por leitura do código e execução real. (1) pedido.py:29-36: parse_itens interpreta os campos posicionais 2/3/4 como tamanho/borda/meio_a_meio incondicionalmente — demonstrado com python3: 'hb01|2|sem cebola' vira {'tamanho': 'sem cebola'} num hambúrguer e a observação é silenciosamente descartada (precificar retorna a linha sem obs e sem erro). (2) dados.py:40-45: BORDAS é dict global único, igual para todas as lojas, validado em pedido.py:98 sem vínculo com item/loja. (3) pedido.py:75-108: só 4 tipos (peso/pizza/combo/default) em if/elif no motor de preços. (4) agent.tf:61: o formato posicional está escrito na descrição do parâmetro 'itens' do action group — cada peculiaridade nova exige alterar o schema Terraform, re-preparar o agente e republicar o alias, além de novo parsing e novo branch de preço. Para o objetivo declarado (padaria multi-loja com 'cada item com peculiaridades': pão fatiado/inteiro, bolo por kg/fatia, adicionais, ponto de assado), o modelo atual não expressa nada disso — é gap arquitetural real e central, não exagerado. A recomendação (modificadores genéricos por item com preço-delta e pares chave=valor no parâmetro) é coerente. Severidade high mantida: não quebra o cardápio pizza/burger atual (por isso não é critical), mas é o principal bloqueio para a evolução pedida e já causa perda silenciosa de dados hoje."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Carrinho não permite remover item nem mudar quantidade, e morre com a sessão (TTL 600s)",
+      "file": "lambda/carrinho.py",
+      "line": 143,
+      "description": "As únicas operações são adicionar_itens, ver_carrinho e limpar_carrinho (tudo-ou-nada). Cenário: cliente montou 6 itens e diz 'tira só o refrigerante' ou 'muda pra 2 coxinhas' — o agente não tem ferramenta para isso; ou o modelo limpa tudo e tenta re-adicionar 5 itens de memória (alto risco de erro/alucinação de ids), ou nega o pedido. Além disso o carrinho vive só em sessionAttributes com `idle_session_ttl_in_seconds = 600` (agent.tf:6): 10 minutos de silêncio (cliente foi pegar o cartão, atendeu o interfone) e o carrinho evaporou; 'volto amanhã pra confirmar a encomenda do bolo' é impossível.",
+      "evidence": "carrinho.py:143-145 — `limpar_carrinho` é a única mutação além de `adicionar` (faz `session_attrs.pop(CHAVE, None)`); agent.tf:6 `idle_session_ttl_in_seconds = 600`; agent.tf:66-74 confirma que o schema não expõe remover/atualizar.",
+      "recommendation": "Curto prazo: adicionar `remover_item(indice_ou_id)` e `alterar_quantidade(indice_ou_id, qtd)` ao action group — as linhas do `_resumo` já podem sair numeradas para o modelo referenciar. Médio prazo: persistir o carrinho em DynamoDB com chave = identidade do cliente (telefone, ver gap de canal) e TTL de horas/dias; sessionAttributes guarda só a referência. Subir o TTL da sessão para 1800-3600s enquanto isso.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Confirmado no código. (1) lambda/carrinho.py só tem adicionar_itens (append via extend, linha 127), ver_carrinho, limpar_carrinho (linhas 143-145, pop tudo-ou-nada) e revisar/finalizar; não existe remover_item nem alterar_quantidade, e o dispatch em handler.py:90-105 e o function_schema em agent.tf:21-113 confirmam que o modelo não tem nenhuma ferramenta para edição parcial do carrinho — 'tira só o refrigerante' força o modelo a limpar tudo e re-adicionar de memória (alto risco de erro de ids no formato 'id|qtd|tamanho|...') ou negar. (2) agent.tf:6 tem idle_session_ttl_in_seconds = 600 e o carrinho vive só em sessionAttributes, sem qualquer persistência (não há DynamoDB/storage no repo), então 10 min de silêncio evaporam o carrinho e encomendas entre sessões são impossíveis. Único deslize do finding: afirma que as linhas do _resumo 'já podem sair numeradas' — hoje não saem numeradas, mas isso está na recomendação, não na evidência. Para o objetivo de atendente completo de padaria, edição de pedido mid-conversa é fluxo central; severidade high se sustenta (o TTL sozinho seria medium, mas o gap de edição justifica high)."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Sem identidade de cliente nem canal real — o agente só é alcançável pelo invoke.py de teste",
+      "file": "invoke.py",
+      "line": 16,
+      "description": "Não há telefone, autenticação ou cadastro: `nome_cliente` é texto livre digitado na hora de finalizar (agent.tf:99-104), o sessionId é um UUID aleatório gerado pelo CLI (invoke.py:18) e o único cliente existente é um script boto3 para o dev. Um cliente real de padaria não vai instalar boto3 — ele chega pelo WhatsApp. Sem identidade também não existe histórico ('o de sempre'), endereço salvo, nem como a loja ligar de volta se algo der errado no pedido — o pedido finalizado não carrega nem telefone de contato.",
+      "evidence": "invoke.py:16-18 — `agent_id = os.environ.get(\"AGENT_ID\", ...)`, `session_id = sys.argv[2] ... f\"cli-{uuid.uuid4().hex[:8]}\"`; carrinho.py:187 — o 'cadastro' inteiro do cliente é `resultado[\"cliente\"] = params.get(\"nome_cliente\")`.",
+      "recommendation": "Canal WhatsApp: API Gateway + Lambda webhook recebendo mensagens da WhatsApp Business Cloud API (Meta) ou Twilio, invocando `bedrock-agent-runtime.invoke_agent` com `sessionId = telefone do cliente` (identidade natural e estável) e devolvendo a resposta. Injetar o telefone em sessionAttributes para o finalizar_pedido gravá-lo no pedido. Tabela DynamoDB `clientes` (PK = telefone) com nome, endereços/CEPs salvos e últimos pedidos, permitindo 'quer entregar no endereço de sempre?'.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Confirmado no código real. (1) Único canal de acesso é o script de teste boto3: invoke.py:16-18 define agent_id/alias_id hardcoded e `session_id = sys.argv[2] if len(sys.argv) > 2 else f\"cli-{uuid.uuid4().hex[:8]}\"` — sessionId aleatório por execução do CLI. Grep em todo o repo (*.tf, *.py, *.md, *.txt) não encontra API Gateway, webhook, WhatsApp, Twilio ou qualquer outro ponto de entrada; agent.tf só cria o agente, action group e alias \"dev\". (2) Identidade do cliente é apenas texto livre: agent.tf:99-104 declara `nome_cliente` como string, e lambda/carrinho.py:187 faz `resultado[\"cliente\"] = params.get(\"nome_cliente\")` — não existe campo telefone em nenhum lugar do repo, então o pedido finalizado não carrega contato algum para a loja retornar. (3) Agravante que reforça o gap: finalizar_pedido (carrinho.py:180-193) não persiste nada — gera `PED-{uuid}` e devolve o dict na resposta; sem persistência nem identidade, \"histórico do cliente\" e \"o de sempre\" são impossíveis. Para o objetivo declarado do dono (atendente completo de padaria multi-loja), canal real + identidade estável (ex.: telefone como sessionId via webhook WhatsApp) é capacidade essencial que de fato não existe. Severidade high se sustenta: não é bug de código, mas é o gap que impede qualquer cliente real de usar o sistema e impede a loja de contatar quem pediu. A recomendação do finding (webhook WhatsApp → invoke_agent com sessionId = telefone, telefone em sessionAttributes, tabela de clientes) é coerente com a arquitetura atual (carrinho já vive em sessionAttributes)."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Multi-loja é na verdade '2 lojas fixas A/B' cravadas no schema do agente e no prompt; sem feriados",
+      "file": "agent.tf",
+      "line": 54,
+      "description": "O objetivo é N lojas, mas os ids 'A' e 'B' estão hardcoded na descrição dos parâmetros do action group (agent.tf:37 'loja A ou B', agent.tf:54), a validação em carrinho.py:95 responde 'Escolha A ou B', e instructions.txt:1 abre com 'um delivery com 2 lojas: A (Pizzaria Central...) e B (Burger Jardins...)'. Adicionar a 3ª loja exige editar prompt + schema Terraform + republicar alias. Além disso `loja_aberta` (geo.py:28-33) só conhece dia-da-semana: não há feriados, horários especiais (véspera de Natal), fechamento pontual ('quebrou o forno hoje'), nem faixas viradas de dia (loja que fecha 01:00 — `_minutos(abre) <= atual <= _minutos(fecha)` falha se fecha < abre).",
+      "evidence": "agent.tf:54 `description = \"Opcional. Loja A ou B...\"`; instructions.txt:1; geo.py:32-33 `faixas = loja[\"horarios\"].get(momento.weekday(), []) ... any(_minutos(abre) <= atual <= _minutos(fecha) ...)` — sem calendário de exceções e quebra em faixas que cruzam a meia-noite.",
+      "recommendation": "Lojas em DynamoDB (junto com o catálogo) com: horários regulares, lista de exceções por data (feriado/evento: fechado ou horário especial) e flag `aberta_manual` para fechamento imediato pelo dono. `loja_aberta` consulta exceções antes do horário regular e trata faixas overnight (se fecha < abre, a faixa vale até o dia seguinte). Tirar 'A ou B' das descrições do schema e do prompt — descrever genericamente ('id da loja retornado por listar_lojas') para que N lojas não exijam republicar o agente.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Todas as evidências conferem no código real: agent.tf:37 e :54 têm \"loja A ou B\" literal nas descrições do function_schema (e agent.tf:44 \"Lista as 2 lojas\"), carrinho.py:95 retorna \"Loja invalida. Escolha A ou B.\", e instructions.txt:1 e :11 cravam \"2 lojas: A ... e B ...\" e os códigos A/B. Adicionar uma 3ª loja de fato exige editar prompt + schema Terraform + re-prepare/alias do agente, além de redeploy da Lambda (LOJAS é dict estático em dados.py). geo.py:28-33 confirma que loja_aberta só conhece weekday: não há feriados, exceções por data nem flag de fechamento manual em nenhum arquivo do repo. A condição `_minutos(abre) <= atual <= _minutos(fecha)` realmente falha para faixas que cruzam a meia-noite; nuance: nenhuma loja atual dispara isso (a Pizzaria Central contorna com \"23:59\", inclusive divergindo do horario_texto \"até 24h\"), então é limitação latente do modelo de dados, não bug ativo — mas irrepresentável para o caso comum de pizzaria fechando após meia-noite. Ponto atenuante menor: a lógica interna (_escolher_loja itera LOJAS genericamente) já é N-lojas; o acoplamento está no schema/prompt/mensagem de erro/dados estáticos. Como o gap ataca o núcleo do objetivo declarado (atendente multi-loja com horários por loja) e a capacidade de exceções de calendário é totalmente ausente, severidade high se mantém."
+      }
+    },
+    {
+      "severity": "high",
+      "title": "Sem pagamento e sem ciclo de status do pedido (recebido/preparo/saiu/entregue)",
+      "file": "lambda/carrinho.py",
+      "line": 186,
+      "description": "O fluxo termina no 'pedido_id' — não existe forma de pagamento (nem perguntar 'dinheiro, cartão ou Pix?'), nem valor de troco, nem estados do pedido. Cliente pergunta 'meu pedido já saiu?' e o agente não tem ferramenta para responder (e como nada é persistido — gap 1 — nem teria onde olhar). Para 'atendente completo', acompanhar o pedido pós-fechamento é metade do atendimento real de delivery.",
+      "evidence": "agent.tf:88-112 — o schema de finalizar_pedido só tem cep, nome_cliente e observacoes; nenhuma função de consulta de status existe no action group; carrinho.py:180-193 não cria nenhum estado consultável.",
+      "recommendation": "Depende da persistência (gap 1): campo `status` no item do pedido em DynamoDB com transições RECEBIDO → EM_PREPARO → SAIU_PARA_ENTREGA → ENTREGUE (atualizado pela loja via painel/API simples). Nova função do agente `status_pedido(pedido_id?)` que busca pelo telefone da sessão. Pagamento em fases: (1) perguntar forma de pagamento e troco e gravar no pedido — só isso já destrava operação real com pagamento na entrega; (2) Pix copia-e-cola ou link de pagamento (Mercado Pago/Stripe) gerado no finalizar, com webhook atualizando o status para PAGO via EventBridge.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "high",
+        "reasoning": "Confirmado no código. (1) carrinho.py:180-193: finalizar_pedido só gera um UUID (PED-XXXX), anexa nome/observações e apaga o carrinho da sessão — nada é persistido, não há estado consultável. (2) agent.tf:88-112: o schema de finalizar_pedido tem apenas cep, nome_cliente e observacoes; nenhum parâmetro de forma de pagamento ou troco. (3) O action group inteiro (agent.tf:21-114) tem 7 funções e nenhuma consulta status de pedido. (4) Grep por pagamento|pix|cartao|troco|status|dynamodb em todo o repo (.py/.tf/.txt): zero ocorrências — nem o instructions.txt orienta o agente a perguntar forma de pagamento. O cenário de falha se sustenta: a loja recebe um pedido sem saber como será pago, e o cliente que pergunta \"meu pedido já saiu?\" não tem ferramenta que responda (e, sem persistência, nem haveria onde olhar — a sessão expira em 600s). Severidade high mantida: pagamento na entrega é pré-requisito operacional de delivery real e a fase 1 (perguntar/gravar forma de pagamento e troco) está totalmente ausente; não é critical porque o fluxo de venda existente (cardápio → carrinho → total) funciona — é capacidade ausente, não defeito no que existe. O ciclo de status depende do gap de persistência, mas isso não invalida o finding."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "Sem noção de estoque/esgotado — o agente vende o que acabou",
+      "file": "lambda/geo.py",
+      "line": 36,
+      "description": "A única disponibilidade que existe é temporal: `item_disponivel` checa apenas a janela de horário do item (geo.py:36-43) e `loja_aberta` o expediente. Não há campo de estoque nem flag 'esgotado' no modelo de item. Cenário clássico de padaria: acabou o pão francês às 17h — o agente continua aceitando o pedido, a loja recebe (quando gap 1 for resolvido) e precisa ligar para o cliente cancelar. Isso corrói a confiança no canal automático.",
+      "evidence": "geo.py:38-43 — `de, ate = item.get(\"disponivel_de\"), item.get(\"disponivel_ate\"); if not de or not ate: return True` — nenhuma outra dimensão de disponibilidade; cardapio_itens.py não tem campo de estoque em nenhum item.",
+      "recommendation": "No catálogo em DynamoDB, adicionar por item+loja: flag `esgotado` (booleana, o caso de padaria é mais liga/desliga do que contagem) e opcionalmente `estoque_qtd` para itens contáveis (bolos inteiros). `precificar` e `consultar_cardapio` passam a filtrar/recusar esgotados com mensagem clara. Painel/comando simples para a loja marcar 'acabou' na hora (até um bot interno ou app amplify mínimo). Contagem com decremento transacional (condition expression) só se/quando houver itens de estoque crítico.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Confirmado no código real. Em lambda/geo.py:36-43, `item_disponivel` avalia apenas a janela de horário do item (`disponivel_de`/`disponivel_ate`) e retorna True incondicionalmente quando ela não existe; `loja_aberta` (geo.py:28-33) cobre só o expediente. Análise via AST de lambda/cardapio_itens.py mostra que o modelo de item tem exatamente os campos {id, categoria, tipo, nome, descricao, lojas, preco|tamanhos, permite_meio_a_meio, inclui, disponivel_de, disponivel_ate} — nenhum campo de estoque ou flag de esgotado em nenhum dos 110 itens. Grep no repo inteiro por estoque/esgotado/stock não encontra nada em código; instructions.txt só trata de indisponibilidade temporal via `disponivel_agora`, que handler.py:36-45 calcula exclusivamente de janela + loja aberta, e pedido.py:134 usa apenas `geo.item_disponivel` antes de precificar. Ou seja, não existe NENHUM mecanismo para impedir a venda de item esgotado — e, como o catálogo é um arquivo Python estático empacotado na Lambda, a loja nem teria por onde marcar \"acabou\" sem redeploy. Para o objetivo declarado (atendente completo de padaria multi-loja, onde itens acabam ao longo do dia rotineiramente), a capacidade realmente importa. Severidade medium é adequada: é gap arquitetural, não bug de comportamento existente, e o impacto prático depende de os pedidos chegarem de fato à loja; a recomendação (flag `esgotado` por item+loja em catálogo mutável, filtrada em consultar_cardapio e precificar) é proporcional."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "Entrega sem área/raio e sem tempo estimado; frete fixo por loja e ViaCEP como ponto único de falha",
+      "file": "lambda/geo.py",
+      "line": 85,
+      "description": "O frete é um valor fixo por loja com teto de gratuidade (geo.py:85-88) e o CEP é apenas validado como existente no ViaCEP — qualquer CEP do Brasil é aceito: um cliente de Porto Alegre fecha pedido na Pizzaria Central da Paulista pagando R$ 6 de frete. Não há raio/área de entrega, frete por distância, nem tempo estimado de entrega (pergunta nº 1 de qualquer cliente). Além disso a validação depende de uma chamada HTTP síncrona ao ViaCEP sem fallback: se o serviço oscilar, `_get_json` devolve None e revisar/finalizar falham com 'CEP nao encontrado' (geo.py:80), bloqueando 100% dos fechamentos.",
+      "evidence": "geo.py:85-88 — `frete_da_loja` só compara subtotal com `frete_gratis_acima`; geo.py:54 `except Exception: return None` + geo.py:80 `return {\"valido\": False, \"erro\": \"CEP nao encontrado\"}` — indisponibilidade do ViaCEP é indistinguível de CEP inválido; nenhuma verificação de cidade/UF/distância contra a loja.",
+      "recommendation": "Mínimo imediato: validar cidade/UF do retorno do ViaCEP contra a da loja e recusar fora da praça; distinguir 'CEP inválido' de 'serviço indisponível, tente de novo'. Evolução: Amazon Location Service (geocoding do endereço + cálculo de rota) para raio de entrega por loja, frete por faixa de distância e ETA estimado (tempo de preparo por loja + tempo de rota), retornados no revisar_pedido. Cachear geocoding por CEP em DynamoDB para não pagar/esperar duas vezes.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Finding confirmado integralmente no código. (1) geo.py:85-88: frete_da_loja é fixo por loja, só zera acima de frete_gratis_acima — sem raio, área ou distância. (2) consultar_cep (geo.py:58-80) valida apenas existência do CEP no ViaCEP e retorna cidade/UF, mas revisar_pedido (carrinho.py:159-161) só checa \"valido\" — nenhuma comparação de cidade/UF com a loja, então um CEP de Porto Alegre fecha pedido na Pizzaria Central (Paulista) pagando os R$ 6 de frete_base (dados.py:79). (3) geo.py:54 engole qualquer exceção de rede (`except Exception: return None`) e geo.py:80 converte isso em \"CEP nao encontrado\" — indisponibilidade do ViaCEP é indistinguível de CEP inválido e bloqueia 100% de revisar/finalizar (finalizar_pedido delega a revisar_pedido, carrinho.py:180-184), sem retry/cache/fallback. (4) Não existe nenhum campo de ETA/tempo de preparo no repo. Todas as linhas citadas conferem. Severidade medium mantida: é gap arquitetural real e relevante para o objetivo de atendente completo de delivery multi-loja (o próprio docstring do módulo admite a limitação), mas não corrompe dados nem quebra o fluxo feliz enquanto o ViaCEP está no ar."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "Zero testes no motor de preços e observabilidade limitada a prints implícitos — regressão de preço passa despercebida",
+      "file": "lambda/pedido.py",
+      "line": 121,
+      "description": "Não existe nenhum arquivo de teste no repositório (verificado: só handler/dados/geo/pedido/carrinho/cardapio_itens em lambda/). O motor de preços tem lógica genuinamente fácil de quebrar — meio-a-meio cobra o mais caro (pedido.py:64), borda soma adicional, peso converte gramas→kg com mínimo, arredondamentos — e qualquer refactor (como o do gap 4, que vai reescrever `_monta_linha`) pode cobrar errado do cliente sem ninguém notar. Também não há logging estruturado (nenhum `logging`/print no handler), então um erro em produção vira só um traceback solto no CloudWatch; não há alarmes de erro/latência da Lambda nem métrica de 'pedidos finalizados'.",
+      "evidence": "`grep -rl test lambda/ *.py` não retorna nenhum arquivo de teste; handler.py não importa `logging` e não loga event/função/resultado; lambda.tf não cria alarme algum e iam.tf só tem AWSLambdaBasicExecutionRole.",
+      "recommendation": "pytest sobre pedido.py e geo.py — são stdlib puro, testáveis sem AWS: casos para meio-a-meio (mais caro, sabor de outra loja, tamanho inexistente), peso (mínimo, arredondamento), borda inválida, `loja_aberta` com faixas múltiplas e overnight, `item_disponivel` nos limites da janela. Injetar `momento` (já existe o parâmetro) para congelar o relógio. No handler: `logging` estruturado (função, params, sucesso/erro, duração) — ou aws-lambda-powertools se abrir mão do stdlib-only. Em Terraform: alarme CloudWatch de Errors/Throttles da Lambda e métrica custom `PedidosFinalizados` para detectar queda de conversão.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Finding confirmado integralmente no código. (1) Zero testes: o repositório contém apenas os 6 módulos em lambda/ mais os .tf — nenhum test_*.py, nenhum tests/, nenhum framework de teste. (2) Zero observabilidade no código: grep por logging/print em lambda/ retorna vazio; handler.py não importa logging e sequer tem try/except no dispatch (handler.py:85-118) — exceções em carrinho/pedido viram traceback cru no CloudWatch e falha opaca no Bedrock Agent. (3) Zero alarmes: lambda.tf só cria a função e a lambda_permission; iam.tf só anexa AWSLambdaBasicExecutionRole; nenhum aws_cloudwatch_metric_alarm ou métrica custom existe. (4) O motor de preços é genuinamente frágil e trivialmente testável: meio-a-meio cobra o mais caro via max(precos) (pedido.py:64), borda soma BORDAS[borda] (linha 100), peso converte gramas→kg com mínimo (linhas 75-90), arredondamentos em três pontos — tudo stdlib puro, sem AWS. A recomendação de injetar o relógio também procede: geo.loja_aberta e geo.item_disponivel já aceitam momento=None (geo.py:28 e 36). Severidade medium mantida: não é defeito ativo em runtime, mas o objetivo declarado (atendente completo multi-loja) implica refactors no motor de preços, e sem nenhum teste uma regressão de cobrança ao cliente passa despercebida; não sobe para high por ser gap de qualidade/processo, não bug."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "Prompt e categorias duplicados em três lugares — o cardápio 'vaza' para instructions.txt e agent.tf",
+      "file": "instructions.txt",
+      "line": 32,
+      "description": "Regras de negócio que pertencem aos dados estão copiadas no prompt e no schema: instructions.txt:32 descreve bordas ('catupiry, cheddar ou chocolate'), tamanhos e a regra de salgados por grama; agent.tf:30 lista as 11 categorias literalmente na descrição do parâmetro. Quando o dono da padaria trocar categorias/bordas (inevitável na migração pizzaria→padaria), há três fontes para atualizar e duas exigem republicar o agente — vão dessincronizar. Não bloqueia hoje, mas encarece cada evolução dos outros gaps.",
+      "evidence": "agent.tf:30 `description = \"Categoria: pizzas, hamburgueres, combos, porcoes, massas, japonesa, saladas, cafe_da_manha, bebidas ou sobremesas\"`; instructions.txt:32 'Borda é opcional (sem/catupiry/cheddar/chocolate, com adicional)... Salgados... a quantidade do salgado é em GRAMAS'.",
+      "recommendation": "Tornar o prompt e o schema agnósticos aos dados: descrições genéricas ('use consultar_cardapio sem categoria para descobrir as categorias válidas'; opções de borda/tamanho vêm no retorno do próprio cardápio, que já as retorna em `tamanhos`). Regra prática: tudo que mudar sem deploy (dados no DynamoDB) não pode estar escrito em instructions.txt nem em agent.tf.",
+      "dimension": "gap-padaria",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código. agent.tf:30 lista as categorias literalmente na descrição do parâmetro e instructions.txt:32 duplica bordas (catupiry/cheddar/chocolate = BORDAS em dados.py:40-45), tamanhos e a regra de salgados por grama (repetida ainda em agent.tf:61). Mais forte que o finding alegava: a dessincronização JÁ existe — dados.py:48-60 define 11 categorias incluindo \"salgados\", mas agent.tf:30 lista só 10 (salgados está ausente do schema), prova concreta de que as três fontes divergem. Correção factual: o finding diz que agent.tf lista \"as 11 categorias\"; na verdade lista 10, o que reforça (não enfraquece) o problema. Ressalva: os dados hoje estão hardcoded em dados.py (não DynamoDB), então toda mudança exige deploy de todo jeito; ainda assim, mudanças em instructions.txt/agent.tf exigem re-preparar o agente Bedrock, um ciclo separado do deploy da Lambda. Severidade low mantida: é dívida de manutenibilidade que encarece a migração pizzaria→padaria, mitigada pelo fallback de consultar_cardapio sem categoria; não quebra o fluxo atual."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "archive_file empacota lambda/__pycache__ no zip da Lambda (sem excludes)",
+      "file": "lambda.tf",
+      "line": 3,
+      "description": "O data \"archive_file\" zipa o diretório lambda/ inteiro e o diretório lambda/__pycache__ EXISTE hoje no working tree (gerado ao rodar os módulos localmente). Cenário concreto: você roda um teste local (python3 -c 'import pedido'), o __pycache__ muda, o output_base64sha256 muda e o próximo terraform apply faz um redeploy espúrio da Lambda sem nenhuma mudança de código; além disso o pacote publicado carrega .pyc da versão local do Python de cada máquina, então dois colaboradores geram hashes diferentes do mesmo fonte e o plan nunca converge entre eles.",
+      "evidence": "lambda.tf: data \"archive_file\" \"lambda\" { type = \"zip\"; source_dir = \"${path.module}/lambda\"; ... } — sem excludes; e `ls lambda/` mostra __pycache__ presente.",
+      "recommendation": "Adicionar excludes ao archive_file: `excludes = [\"__pycache__\", \"**/__pycache__/**\", \"**/*.pyc\"]` (suportado pelo provider archive >= 2.4, já exigido em versions.tf).",
+      "dimension": "infra-terraform",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código: lambda.tf (linhas 1-5) define data \"archive_file\" \"lambda\" com source_dir = \"${path.module}/lambda\" e SEM excludes, e lambda/__pycache__/ existe no working tree (regenerado hoje às 08:41, mais recente que os .py). Como aws_lambda_function.actions usa source_code_hash = output_base64sha256 (linha 13), qualquer .pyc regenerado por execução local muda o hash e dispara redeploy espúrio no próximo apply; .pyc também variam por versão do CPython local, tornando o hash não determinístico entre máquinas. versions.tf já exige archive >= 2.4, que suporta glob em excludes, então a correção sugerida (excludes = [\"__pycache__\", \"**/__pycache__/**\", \"**/*.pyc\"]) é diretamente aplicável. Porém o impacto é apenas higiene operacional — redeploy desnecessário, ruído no plan e zip inflado; nenhuma quebra funcional (o runtime python3.12 da Lambda ignora/regenera .pyc). Em um projeto hoje single-dev, o cenário de \"plan nunca converge entre colaboradores\" é hipotético. Severidade ajustada de medium para low."
+      }
+    },
+    {
+      "severity": "medium",
+      "title": "Estado Terraform local, sem backend remoto nem lock compartilhado",
+      "file": "versions.tf",
+      "line": 1,
+      "description": "O bloco terraform {} não declara backend; terraform.tfstate vive só na máquina do dono (confirmado: terraform.tfstate e .backup existem na raiz, corretamente fora do git). Cenário concreto para o objetivo declarado de evoluir o projeto (mais lojas, mais colaboradores): um segundo colaborador clona o repo, roda terraform apply e, como não enxerga o estado, tenta recriar tudo — os nomes IAM são fixos (role \"AmazonBedrockExecutionRoleForAgents_agente-pedidos\" e \"agente-pedidos-lambda\"), então recebe EntityAlreadyExists e trava; e se o laptop do dono perder o disco, agente, alias, Lambda e roles viram recursos órfãos sem como fazer destroy/import trivial.",
+      "evidence": "versions.tf tem apenas required_version/required_providers e provider aws; `ls` na raiz mostra terraform.tfstate e terraform.tfstate.backup locais.",
+      "recommendation": "Configurar backend remoto, ex.: `backend \"s3\" { bucket = ..., key = \"bedrock-agent-pedidos/terraform.tfstate\", region = \"us-east-1\", use_lockfile = true }` (S3 native locking, Terraform >= 1.10) — ou HCP Terraform. O state contém account ID e ARNs, então o bucket deve ser privado com criptografia.",
+      "dimension": "infra-terraform",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "medium",
+        "reasoning": "Confirmado no código real: versions.tf (linhas 1–14) não declara nenhum bloco backend (grep por \"backend\" em todos os .tf retorna vazio), e terraform.tfstate + terraform.tfstate.backup existem apenas localmente na raiz, corretamente ignorados pelo .gitignore (*.tfstate) — logo o estado não tem cópia remota nem versionada. Os nomes fixos citados também conferem: iam.tf linha 4 (\"AmazonBedrockExecutionRoleForAgents_${var.agent_name}\") e linha 42 (\"${var.agent_name}-lambda\"), além de lambda.tf linha 8 (\"${var.agent_name}-actions\"). O cenário de falha se sustenta: um segundo colaborador que clonar o repo e rodar terraform apply não enxerga o estado e tenta recriar recursos com nomes IAM/Lambda determinísticos, recebendo EntityAlreadyExists/ResourceConflictException; e a perda do disco do dono deixa agente, alias, Lambda e roles órfãos, recuperáveis só via terraform import manual. Severidade medium mantida: não quebra nada hoje (projeto single-dev, todos os recursos são importáveis e não há recursos com dados persistentes no state), mas é um gap operacional real e barato de corrigir que bloqueia colaboração/CI, condizente com o objetivo declarado de evoluir o projeto. A recomendação de backend S3 com use_lockfile é tecnicamente correta (exige Terraform >= 1.10, o que pede ajuste do required_version atual \">= 1.5\")."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "invoke.py com agent_id/alias_id hardcoded como default e região fixa us-east-1",
+      "file": "invoke.py",
+      "line": 16,
+      "description": "Os defaults \"1B0CRSOXZ3\" e \"M57OUWSDFF\" são IDs do deploy atual do dono. Cenário concreto: o próprio README instrui `terraform apply -replace=aws_bedrockagent_agent_alias.dev` após cada mudança, o que gera um alias_id NOVO — quem rodar `python3 invoke.py \"...\"` sem exportar ALIAS_ID cai no alias antigo hardcoded e recebe ResourceNotFoundException (ou, pior, conversa silenciosamente com uma versão antiga do agente se o alias velho ainda existir). A região também está fixa em \"us-east-1\" no client boto3, divergindo de var.region se alguém trocar a variável no Terraform. Não é vazamento de segredo (IDs de agente não são credenciais), mas é drift garantido.",
+      "evidence": "invoke.py: `agent_id = os.environ.get(\"AGENT_ID\", \"1B0CRSOXZ3\")`, `alias_id = os.environ.get(\"ALIAS_ID\", \"M57OUWSDFF\")` e `region_name=\"us-east-1\"` fixo; README linha 52: \"gera um alias_id novo\".",
+      "recommendation": "Remover os defaults (falhar com mensagem clara pedindo AGENT_ID/ALIAS_ID) ou resolvê-los via `terraform output -raw` num wrapper; ler a região de AWS_REGION/AWS_DEFAULT_REGION em vez de fixar.",
+      "dimension": "infra-terraform",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código: invoke.py:16-17 tem defaults hardcoded \"1B0CRSOXZ3\"/\"M57OUWSDFF\" e invoke.py:12 fixa region_name=\"us-east-1\", divergindo de var.region em variables.tf. O README (linha 52) confirma que o fluxo recomendado de iteração (terraform apply -replace do alias) gera alias_id novo, tornando o default do ALIAS_ID obsoleto após o primeiro replace — rodar invoke.py sem a env var resulta em ResourceNotFoundException ou em conversar com versão antiga do agente. Atenuante: os exemplos do README sempre passam ALIAS_ID=$(terraform output -raw agent_alias_id) inline, então quem segue o README não é afetado; é atrito de DX num script de teste, sem vazamento de credencial. Severidade low mantida."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "README contradiz variables.tf sobre o foundation model (Nova Lite vs Nova Pro)",
+      "file": "README.md",
+      "line": 3,
+      "description": "A primeira linha do README diz \"Foundation model **Amazon Nova Lite**\", mas variables.tf define default `us.amazon.nova-pro-v1:0` e a própria seção \"Modelo\" do README (linha 41) explica que o Nova Lite foi abandonado por corromper o parâmetro `itens`. Cenário concreto: um colaborador lê o cabeçalho, habilita/valida acesso ao Nova Lite no console (ou assume o custo do Lite) e se surpreende com o comportamento/custo do Pro; documentação divergente do IaC é exatamente o tipo de coisa que induz mudança errada em var.foundation_model.",
+      "evidence": "README.md linha 3: \"Foundation model **Amazon Nova Lite**\" vs variables.tf: `default = \"us.amazon.nova-pro-v1:0\"` e README linha 41: \"o Nova Pro é confiável em tool use\".",
+      "recommendation": "Corrigir a linha 3 do README para \"Amazon Nova Pro\" (mantendo a nota histórica da seção Modelo).",
+      "dimension": "infra-terraform",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código real. README.md linha 3 afirma \"Foundation model **Amazon Nova Lite**\", enquanto variables.tf define `default = \"us.amazon.nova-pro-v1:0\"` (consumido em agent.tf linha 4 via `var.foundation_model`). A própria seção \"Modelo\" do README (linha 41) contradiz o cabeçalho: documenta que o projeto COMEÇOU no Nova Lite, mas o abandonou porque ele \"montava mal o parâmetro `itens` e entrava em loop\", e que \"o Nova Pro é confiável em tool use\". Ou seja, a linha 3 não é só desatualizada — ela aponta exatamente para o modelo que o repo documentou como quebrado para este caso de uso, o que torna plausível o cenário de um colaborador mudar var.foundation_model para o Lite (mais barato) confiando no cabeçalho e reintroduzir o bug de tool use. Ainda assim, é uma inconsistência puramente de documentação, sem impacto em runtime, com correção trivial de uma linha — severidade low está correta. Recomendação: trocar \"Amazon Nova Lite\" por \"Amazon Nova Pro\" na linha 3 do README, mantendo a nota histórica da seção Modelo."
+      }
+    },
+    {
+      "severity": "low",
+      "title": "Policy do agente só normaliza o prefixo \"us.\" do inference profile",
+      "file": "iam.tf",
+      "line": 35,
+      "description": "A policy cobre corretamente o cenário atual: `bedrock:InvokeModel*` no inference profile regional E no foundation model subjacente via `arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0` (região wildcard cobre us-east-1/us-east-2/us-west-2 para onde o profile `us.` roteia). O gap é que `trimprefix(var.foundation_model, \"us.\")` só remove \"us.\": cenário concreto — se var.foundation_model for trocado para um profile de outra geografia (\"eu.amazon.nova-pro-v1:0\") ou global (\"global.amazon...\"), o trimprefix não remove nada, o ARN de foundation-model vira `foundation-model/eu.amazon.nova-pro-v1:0` (inexistente) e o agente falha com AccessDenied na inferência, um erro difícil de diagnosticar.",
+      "evidence": "iam.tf linha 35: `\"arn:aws:bedrock:*::foundation-model/${trimprefix(var.foundation_model, \"us.\")}\"`",
+      "recommendation": "Normalizar qualquer prefixo geográfico, ex.: `replace(var.foundation_model, \"/^(us|eu|apac|apne|apso|ca|sa|global)\\\\./\", \"\")`, ou declarar duas variáveis (inference_profile_id e model_id) e montar os dois ARNs explicitamente.",
+      "dimension": "infra-terraform",
+      "verdict": {
+        "isReal": true,
+        "adjustedSeverity": "low",
+        "reasoning": "Confirmado no código: iam.tf linha 35 usa `trimprefix(var.foundation_model, \"us.\")`, que remove apenas o prefixo literal \"us.\". A variável foundation_model (variables.tf, default \"us.amazon.nova-pro-v1:0\") é string livre sem validation; se trocada para um profile de outra geografia (\"eu.\", \"apac.\", \"global.\"), o ARN da linha 35 viraria um foundation-model inexistente (ex.: foundation-model/eu.amazon.nova-pro-v1:0), e a inferência cross-region falharia com AccessDenied — erro real e difícil de diagnosticar, pois a linha 34 (inference profile) continuaria correta. Hoje, porém, não há bug: com o default \"us.\" a policy cobre corretamente profile regional + foundation model via região wildcard. É fragilidade latente que só se manifesta em troca futura de modelo/geografia — cenário plausível (o dono já trocou de modelo uma vez por bloqueio do Claude), mas condicional. Severidade low está bem calibrada; recomendação de normalizar qualquer prefixo geográfico ou separar inference_profile_id de model_id é adequada."
+      }
+    }
+  ],
+  "rejected": [],
+  "testerBugs": [
+    {
+      "scenario": "parse_itens: quantidade não numérica é silenciosamente convertida para 1",
+      "input": "pedido.parse_itens('pz01|abc') e pedido.parse_itens('pz01|2.5')",
+      "observed": "Ambas retornam [{'id': 'pz01', 'qtd': 1}]. 'abc'.isdigit() e '2.5'.isdigit() são False, então qtd cai no default 1 sem nenhum erro. Um cliente que pede '2.5 kg' ou cujo modelo passa qtd malformada recebe 1 unidade sem aviso.",
+      "isBug": true,
+      "severity": "medium",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/pedido.py",
+      "recommendation": "Em parse_itens (linha 28), rejeitar qtd não vazia que não seja dígito, retornando erro em vez de assumir 1. Hoje o agente confirmaria um pedido diferente do que o cliente pediu."
+    },
+    {
+      "scenario": "parse_itens: quantidade negativa vira 1 em vez de erro",
+      "input": "pedido.parse_itens('pz01|-2') seguido de precificar('A', ...)",
+      "observed": "parse retorna qtd=1 ('-2'.isdigit() é False) e precificar cobra 1 pizza (subtotal 58.9) sem erro. Já 'pz01|0' passa no parse com qtd=0 e só é barrado em precificar com 'Quantidade invalida para Marguerita'. Comportamento inconsistente: 0 dá erro, -2 vira 1 silenciosamente.",
+      "isBug": true,
+      "severity": "medium",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/pedido.py",
+      "recommendation": "Validar sinal e formato na mesma etapa: qualquer qtd fora de int >= 1 deve gerar erro explícito no parse."
+    },
+    {
+      "scenario": "parse_itens: observação contendo '|' é truncada silenciosamente",
+      "input": "pedido.parse_itens('hb01|1||||obs com | pipe')",
+      "observed": "Retorna obs='obs com' — o trecho ' pipe' após o '|' extra é descartado sem erro, pois split('|') gera 7 campos e só campos[5] é lido. A observação do cliente chega mutilada na cozinha.",
+      "isBug": true,
+      "severity": "medium",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/pedido.py",
+      "recommendation": "Usar bloco.split('|', 5) para que tudo a partir do 6o campo permaneça na obs, ou juntar campos[5:] com '|'."
+    },
+    {
+      "scenario": "precificar: arredondamento de meio centavo para baixo em itens por peso",
+      "input": "precificar('A', [{'id': 'sg01', 'qtd': 250}]) — 59.90/kg x 250g = R$ 14,975",
+      "observed": "Subtotal exibido = 14.97 em vez de 14.98 (arredondamento comercial half-up). Ocorre em todo múltiplo que cai em .xx5: sg01 250g→14.97, 350g→20.96, 450g→26.95. Causa: round() do Python sobre float (14.975 é armazenado como 14.9749...). Já a divergência 'subtotal geral vs soma das linhas' NÃO foi reproduzida: varredura de combinações de 2-3 itens com qtds 3/7/9 e de preco_unitario*qtd em qtd 2..11 não achou nenhum caso — o subtotal exibido sempre bateu com a soma Decimal das linhas exibidas.",
+      "isBug": true,
+      "severity": "low",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/pedido.py",
+      "recommendation": "Na linha 80-86 de pedido.py, calcular preço por peso em centavos inteiros ou com decimal.Decimal + ROUND_HALF_UP. Hoje a padaria perde meio centavo por linha nesses pesos (e o valor exibido diverge do cálculo comercial esperado)."
+    },
+    {
+      "scenario": "loja_aberta: fronteira sábado 23:59 → domingo 00:00 na loja A",
+      "input": "geo.loja_aberta(LOJAS['A'], sáb 2026-07-11 23:59) e (dom 2026-07-12 00:00)",
+      "observed": "23:59 → True; 00:00 → False. O horario_texto promete 'das 18h as 24h', mas a faixa cadastrada é ('18:00','23:59'): à meia-noite em ponto a loja consta fechada. O minuto 23:59:00–23:59:59 é o último aceito; 24h nunca é atingido.",
+      "isBug": true,
+      "severity": "low",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/dados.py",
+      "recommendation": "Ou ajustar o texto para 'até 23:59', ou (melhor) suportar fechamento exclusivo às 24:00/00:00 em geo.loja_aberta."
+    },
+    {
+      "scenario": "loja_aberta: janela que cruza a meia-noite NUNCA abre a loja",
+      "input": "loja fake {'horarios': {4: [('18:00','02:00')]}} testada sexta 20:00, sexta 23:59 e sábado 01:00",
+      "observed": "False nos TRÊS horários — inclusive sexta 20:00, que está claramente dentro da janela 18h–2h. Causa: em geo.loja_aberta a condição é _minutos(abre) <= atual <= _minutos(fecha); com fecha='02:00' (120 min) < abre='18:00' (1080 min), a condição é impossível de satisfazer. Uma janela que cruza a meia-noite não só falha na madrugada seguinte: ela desativa a faixa inteira. Limitação crítica para o objetivo de padaria/pizzaria com horários noturnos por loja.",
+      "isBug": true,
+      "severity": "high",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/geo.py",
+      "recommendation": "Em loja_aberta (linha 33), tratar fecha < abre como janela cruzando meia-noite: (atual >= abre) or (atual <= fecha), e considerar a faixa do dia anterior ao avaliar madrugadas. O mesmo vale para item_disponivel (itens de madrugada). Obs: item_disponivel às 11:00 em ponto para janela 07:00-11:00 retorna True (limite inclusivo, ok)."
+    },
+    {
+      "scenario": "handler: adicionar_itens 2x do mesmo item duplica a linha em vez de consolidar",
+      "input": "lambda_handler adicionar_itens {'itens':'hb01|1'} duas vezes com os mesmos sessionAttributes",
+      "observed": "O carrinho na sessão fica {\"loja\": \"A\", \"itens\": [{\"id\": \"hb01\", \"qtd\": 1}, {\"id\": \"hb01\", \"qtd\": 1}]} e o resumo mostra 2 linhas 'Classico da Casa' de qtd 1 (subtotal 53.8, correto). Não consolida em qtd=2. O total está certo, mas o resumo fica confuso para o cliente e o carrinho cresce a cada retry do modelo (retries do Nova reenviando a mesma tool call duplicariam itens silenciosamente).",
+      "isBug": true,
+      "severity": "medium",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "recommendation": "Em adicionar_itens, mesclar item novo com linha existente idêntica (mesmo id/tamanho/borda/meio_a_meio/obs) somando qtd; considerar também uma função remover_itens/alterar_qtd, que hoje não existe (só limpar tudo)."
+    },
+    {
+      "scenario": "handler: loja forçada 'B' é ignorada silenciosamente quando o carrinho já está na loja A",
+      "input": "passo 1: adicionar_itens 'pz01|1|grande' (fixa loja A); passo 2: adicionar_itens {'itens':'hb01|1', 'loja':'B'} (hb01 existe nas duas lojas)",
+      "observed": "Passo 2 retorna sucesso=true com loja 'Pizzaria Central' (A) e o carrinho permanece na loja A. O parâmetro loja='B' é completamente ignorado, sem erro nem aviso — em carrinho.adicionar_itens, quando cart['itens'] não está vazio, o código usa cart['loja'] e nunca consulta a variável 'forcada'. O cliente que pediu explicitamente a loja B recebe confirmação como se tivesse sido atendido.",
+      "isBug": true,
+      "severity": "high",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "recommendation": "No ramo 'carrinho já tem loja' (linhas 98-106), comparar forcada com cart['loja'] e retornar erro/aviso quando divergirem ('seu carrinho está na loja A; para pedir na B, finalize ou limpe o carrinho'), em vez de ignorar."
+    }
+  ],
+  "testerObservations": [
+    {
+      "scenario": "parse_itens: entrada só com separadores",
+      "input": "pedido.parse_itens('|||')",
+      "observed": "Retorna [] (item_id vazio é pulado). Em adicionar_itens isso cai em {'sucesso': False, 'erro': 'Nenhum item informado'}. Comportamento correto.",
+      "isBug": false
+    },
+    {
+      "scenario": "parse_itens: meio-a-meio consigo mesmo é aceito e cobrado como pizza inteira",
+      "input": "pedido.parse_itens('pz01|1|grande|catupiry|pz01')",
+      "observed": "parse retorna meio_a_meio=['pz01','pz01']; _preco_pizza pula o id repetido e precifica como pizza inteira Marguerita grande + borda. Nenhum erro nem aviso — o nome exibido é 'Pizza Marguerita (grande, borda catupiry)'. Funciona por acaso (preço correto), mas o pedido 'meio Marguerita / meio Marguerita' é aceito sem apontar que é redundante.",
+      "isBug": false,
+      "severity": "low",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/pedido.py",
+      "recommendation": "Comportamento benigno (degrada para pizza inteira com preço certo). Opcional: rejeitar ou avisar quando o 2o sabor é igual ao 1o."
+    },
+    {
+      "scenario": "precificar: salgado por peso abaixo do mínimo",
+      "input": "precificar('A', parse_itens('sg01|100'))",
+      "observed": "Retorna erro claro: 'Mini Coxinha de Frango tem pedido minimo de 250g (voce pediu 100g)'. Correto.",
+      "isBug": false
+    },
+    {
+      "scenario": "precificar: meio-a-meio pz05+pz02 grande na loja A (max dos preços)",
+      "input": "precificar('A', parse_itens('pz05|1|grande||pz02'))",
+      "observed": "Retorna 'Pizza Quatro Queijos/Calabresa (grande)' com preco_unitario=66.9 (max de 66.90 e 59.90). Regra do sabor mais caro funciona.",
+      "isBug": false
+    },
+    {
+      "scenario": "precificar: meio-a-meio com sabor exclusivo da loja A pedido na loja B",
+      "input": "precificar('B', parse_itens('pz02|1|grande||pz05')) e o inverso com pz05 como base",
+      "observed": "Ambos rejeitados corretamente: 'O sabor Quatro Queijos nao esta disponivel nesta loja' e 'Quatro Queijos nao esta disponivel nesta loja'. Correto.",
+      "isBug": false
+    },
+    {
+      "scenario": "precificar: borda inválida e combo",
+      "input": "precificar('A', parse_itens('pz02|1|grande|calabresa')) e precificar('A', parse_itens('cb01|2'))",
+      "observed": "Borda: erro 'Borda invalida. Opcoes: sem, catupiry, cheddar, chocolate'. Combo cb01 x2: preco_unitario=74.9, subtotal=149.8. Ambos corretos.",
+      "isBug": false
+    },
+    {
+      "scenario": "loja_aberta: loja B no domingo",
+      "input": "geo.loja_aberta(LOJAS['B'], dom 2026-07-12 12:00)",
+      "observed": "False, como esperado (horarios[6] = []). Correto.",
+      "isBug": false
+    },
+    {
+      "scenario": "handler: finalizar_pedido 2x seguidas",
+      "input": "adicionar_itens 'hb01|2' → finalizar_pedido {'cep':'01310100','nome_cliente':'Leo'} → finalizar_pedido de novo (consultar_cep mockado)",
+      "observed": "1a chamada: sucesso=true, pedido_id='PED-515FC8F4', total=59.8, e sessionAttributes esvaziado ({}). 2a chamada: {'sucesso': false, 'erro': 'Carrinho vazio'}. Não há dupla cobrança — o carrinho é limpo na 1a finalização. Comportamento seguro, embora a mensagem 'Carrinho vazio' não deixe claro que um pedido acabou de ser concluído (o modelo pode reagir mal a um retry).",
+      "isBug": false,
+      "severity": "low",
+      "file": "/Users/leomarzeuski/Projects/bedrock-agent-pedidos/lambda/carrinho.py",
+      "recommendation": "Opcional: guardar o último pedido_id na sessão e, na 2a chamada, responder 'pedido PED-xxxx já foi registrado' para tornar a operação idempotente a retries do agente. Nota: o pedido não é persistido em lugar nenhum (só gera uuid e devolve) — a 'padaria' nunca fica sabendo do pedido."
+    },
+    {
+      "scenario": "handler: tamanho do JSON de consultar_cardapio para a maior categoria",
+      "input": "lambda_handler consultar_cardapio para as 11 categorias; len(json.dumps(...).encode('utf-8'))",
+      "observed": "Maior categoria é 'pizzas' (20 itens): body de 5093 bytes; payload Lambda completo (envelope Bedrock) de 5928 bytes. Demais: combos 2984, hamburgueres 2905, bebidas 2739, cafe_da_manha 2128, sobremesas 2117, porcoes 1976, salgados 1913, japonesa 1649, massas 1588, saladas 1333. Nenhuma chega perto do limite de ~25KB do Bedrock — folga de ~5x mesmo na maior.",
+      "isBug": false,
+      "recommendation": "Sem risco hoje; se o cardápio crescer para 'várias lojas' com mais pizzas, monitorar — a categoria pizzas comportaria ~4x mais itens antes de estourar."
+    }
+  ]
+}

@@ -45,34 +45,37 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
       }
 
       functions {
-        name        = "validar_cep"
-        description = "Valida um CEP de entrega e retorna o endereco e as coordenadas correspondentes"
-
-        parameters {
-          map_block_key = "cep"
-          type          = "string"
-          description   = "CEP com 8 digitos, apenas numeros"
-          required      = true
-        }
-      }
-
-      functions {
-        name        = "cotar_pedido"
-        description = "Calcula o preco exato do pedido (itens, subtotal, frete e total) SEM registrar. Use para montar o resumo antes de confirmar"
+        name        = "adicionar_itens"
+        description = "Adiciona um ou mais itens ao carrinho e retorna o carrinho com precos, a loja escolhida e se ela esta aberta. Se a loja nao for informada, o sistema escolhe uma loja aberta que tenha os itens"
 
         parameters {
           map_block_key = "loja"
           type          = "string"
-          description   = "Loja A ou B"
-          required      = true
+          description   = "Opcional. Loja A ou B, apenas se a pessoa escolheu explicitamente. Se ela nao escolheu, deixe em branco que o sistema seleciona"
+          required      = false
         }
 
         parameters {
           map_block_key = "itens"
           type          = "string"
-          description   = "Mesma lista de itens do criar_pedido: id|qtd|tamanho|borda|meio_a_meio|obs, itens separados por ';'. Ex.: 'bb05|3 ; pz04|1|grande|catupiry|pz01'"
+          description   = "Itens separados por ';' e campos por '|' nesta ordem: id|qtd|tamanho|borda|meio_a_meio|obs. Apenas o id e obrigatorio. tamanho, borda e meio_a_meio sao so para pizza (meio_a_meio = id do 2o sabor). Para salgados (vendidos por kg) a quantidade e em GRAMAS, ex.: 'sg01|500' = 500g. Ex.: 'bb05|3 ; hb01|2 ; pz04|1|grande|catupiry|pz01 ; sg01|500'"
           required      = true
         }
+      }
+
+      functions {
+        name        = "ver_carrinho"
+        description = "Mostra os itens ja escolhidos no carrinho, com precos e subtotal. Use quando a pessoa perguntar o que escolheu ou como esta o pedido"
+      }
+
+      functions {
+        name        = "limpar_carrinho"
+        description = "Esvazia o carrinho para recomecar o pedido do zero"
+      }
+
+      functions {
+        name        = "revisar_pedido"
+        description = "Mostra o resumo final do carrinho com frete e total para um CEP, sem registrar. Use para confirmar antes de finalizar"
 
         parameters {
           map_block_key = "cep"
@@ -80,37 +83,16 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
           description   = "CEP de entrega, 8 digitos"
           required      = true
         }
-
-        parameters {
-          map_block_key = "observacoes"
-          type          = "string"
-          description   = "Observacao geral do pedido (opcional)"
-          required      = false
-        }
       }
 
       functions {
-        name        = "criar_pedido"
-        description = "Registra o pedido. Valida loja aberta, itens disponiveis e CEP. Chamar somente apos confirmacao explicita do resumo"
-
-        parameters {
-          map_block_key = "loja"
-          type          = "string"
-          description   = "Loja escolhida: A ou B"
-          required      = true
-        }
-
-        parameters {
-          map_block_key = "itens"
-          type          = "string"
-          description   = "Itens separados por ';' e campos por '|' nesta ordem: id|qtd|tamanho|borda|meio_a_meio|obs. Apenas o id e obrigatorio. tamanho, borda e meio_a_meio sao so para pizza (meio_a_meio = id do 2o sabor). Ex.: 'bb05|3 ; hb01|2 ; pz04|1|grande|catupiry|pz01'"
-          required      = true
-        }
+        name        = "finalizar_pedido"
+        description = "Registra o pedido a partir do carrinho e gera o numero. Chamar somente apos a pessoa confirmar o resumo do revisar_pedido"
 
         parameters {
           map_block_key = "cep"
           type          = "string"
-          description   = "CEP ja validado do endereco de entrega"
+          description   = "CEP de entrega, 8 digitos"
           required      = true
         }
 

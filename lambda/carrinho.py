@@ -1,0 +1,193 @@
+"""Carrinho persistido na sessao (sessionAttributes) e fechamento do pedido.
+
+O carrinho e a fonte da verdade dos itens escolhidos: fica guardado entre os
+turnos da conversa, entao nenhum item se perde. Cada funcao recebe o dict
+session_attrs e o modifica no lugar (o handler o devolve ao Bedrock).
+"""
+
+import json
+import uuid
+
+import geo
+import pedido
+from dados import LOJAS, get_item
+
+CHAVE = "carrinho"
+
+
+def _lojas_do_item(item_id):
+    produto = get_item(item_id)
+    return produto["lojas"] if produto else []
+
+
+def _ids_do_item(pedido_item):
+    """Ids envolvidos no item: o proprio e, se meio-a-meio, o 2o sabor."""
+    ids = [pedido_item["id"]]
+    for sabor in pedido_item.get("meio_a_meio") or []:
+        if sabor not in ids:
+            ids.append(sabor)
+    return ids
+
+
+def _lojas_efetivas(pedido_item):
+    """Lojas que atendem o item inteiro. Para meio-a-meio, e a intersecao das
+    lojas de todos os sabores (a pizza so existe onde os dois sabores existem)."""
+    conjuntos = [set(_lojas_do_item(i)) for i in _ids_do_item(pedido_item)]
+    return set.intersection(*conjuntos) if conjuntos else set()
+
+
+def _escolher_loja(novos, forcada):
+    """Escolhe a loja para itens num carrinho vazio. Retorna (loja_id, erro).
+
+    Prefere uma loja aberta que venda TODOS os itens. Se a pessoa indicou uma
+    loja (forcada), respeita — desde que ela tenha os itens.
+    """
+    candidatas = [lid for lid in LOJAS if all(lid in _lojas_efetivas(i) for i in novos)]
+    if not candidatas:
+        return None, ("Esses itens nao estao todos na mesma loja. Um pedido e de uma loja so — "
+                      "posso comecar por uma e depois fazer outro pedido.")
+    if forcada:
+        if forcada not in candidatas:
+            return None, f"Esses itens nao estao disponiveis na loja {LOJAS[forcada]['nome']}."
+        return forcada, None
+    abertas = [lid for lid in candidatas if geo.loja_aberta(LOJAS[lid])]
+    return (abertas or candidatas)[0], None
+
+
+def _carregar(session_attrs):
+    bruto = session_attrs.get(CHAVE)
+    if bruto:
+        try:
+            return json.loads(bruto)
+        except json.JSONDecodeError:
+            pass
+    return {"loja": None, "itens": []}
+
+
+def _salvar(session_attrs, cart):
+    session_attrs[CHAVE] = json.dumps(cart, ensure_ascii=False)
+
+
+def _resumo(cart):
+    """Carrinho precificado para exibir (linhas com preco + subtotal)."""
+    linhas, subtotal, erro = pedido.precificar(cart["loja"], cart["itens"])
+    if erro:
+        return {"erro": erro}
+    return {
+        "loja": LOJAS[cart["loja"]]["nome"],
+        "itens": linhas,
+        "quantidade_itens": sum(l["qtd"] for l in linhas),
+        "subtotal": subtotal,
+    }
+
+
+def adicionar_itens(params, session_attrs):
+    novos = pedido.parse_itens(params.get("itens", ""))
+    if not novos:
+        return {"sucesso": False, "erro": "Nenhum item informado"}
+    for it in novos:
+        for sabor in _ids_do_item(it):  # inclui os sabores do meio-a-meio
+            if not get_item(sabor):
+                return {"sucesso": False, "erro": f"Item inexistente: {sabor}"}
+
+    forcada = (params.get("loja") or "").strip().upper() or None
+    if forcada and forcada not in LOJAS:
+        return {"sucesso": False, "erro": "Loja invalida. Escolha A ou B."}
+
+    cart = _carregar(session_attrs)
+    if cart["itens"]:
+        # Carrinho ja tem loja: os novos itens precisam ser dela.
+        loja_id = cart["loja"]
+        fora = [get_item(i["id"])["nome"] for i in novos if loja_id not in _lojas_efetivas(i)]
+        if fora:
+            return {"sucesso": False,
+                    "erro": (f"{', '.join(fora)} nao e da loja {LOJAS[loja_id]['nome']}, onde seu "
+                             "carrinho esta. Um pedido e de uma loja so: posso finalizar ou limpar "
+                             "o carrinho atual antes de trocar de loja.")}
+    else:
+        loja_id, erro = _escolher_loja(novos, forcada)
+        if erro:
+            return {"sucesso": False, "erro": erro}
+
+    # Loja fechada: nao aceita pedido (nao monta carrinho que nao fecha).
+    loja = LOJAS[loja_id]
+    if not geo.loja_aberta(loja):
+        return {"sucesso": False, "loja_fechada": True, "loja": loja["nome"],
+                "horario": loja["horario_texto"],
+                "erro": (f"A {loja['nome']} esta fechada agora ({loja['horario_texto']}). Esse item so "
+                         "e vendido nela; nenhuma loja aberta agora tem esse item. So da pra pedir "
+                         "quando ela reabrir.")}
+
+    # Valida horario dos itens e precifica antes de guardar.
+    _, _, erro = pedido.precificar(loja_id, novos)
+    if erro:
+        return {"sucesso": False, "erro": erro}
+
+    cart["loja"] = loja_id
+    cart["itens"].extend(novos)
+    _salvar(session_attrs, cart)
+
+    resultado = _resumo(cart)
+    resultado["sucesso"] = True
+    resultado["mensagem"] = "Itens adicionados. Deseja mais alguma coisa ou fechar o pedido?"
+    return resultado
+
+
+def ver_carrinho(session_attrs):
+    cart = _carregar(session_attrs)
+    if not cart["itens"]:
+        return {"vazio": True, "mensagem": "Seu carrinho ainda esta vazio."}
+    return _resumo(cart)
+
+
+def limpar_carrinho(session_attrs):
+    session_attrs.pop(CHAVE, None)
+    return {"sucesso": True, "mensagem": "Carrinho esvaziado."}
+
+
+def revisar_pedido(params, session_attrs):
+    """Resumo final com frete e total para um CEP, sem registrar."""
+    cart = _carregar(session_attrs)
+    if not cart["itens"]:
+        return {"sucesso": False, "erro": "Carrinho vazio"}
+
+    loja = LOJAS[cart["loja"]]
+    if not geo.loja_aberta(loja):
+        return {"sucesso": False,
+                "erro": f"A loja {loja['nome']} esta fechada agora. Horario: {loja['horario_texto']}"}
+
+    endereco = geo.consultar_cep(params.get("cep", ""))
+    if not endereco.get("valido"):
+        return {"sucesso": False, "erro": endereco.get("erro", "CEP invalido")}
+
+    linhas, subtotal, erro = pedido.precificar(cart["loja"], cart["itens"])
+    if erro:
+        return {"sucesso": False, "erro": erro}
+
+    entrega = geo.frete_da_loja(loja, subtotal)
+    return {
+        "sucesso": True,
+        "loja": loja["nome"],
+        "endereco_entrega": endereco["endereco"],
+        "itens": linhas,
+        "subtotal": subtotal,
+        "frete": entrega["frete"],
+        "frete_gratis": entrega["gratis"],
+        "total": round(subtotal + entrega["frete"], 2),
+    }
+
+
+def finalizar_pedido(params, session_attrs):
+    """Revalida o carrinho, registra o pedido e esvazia o carrinho."""
+    resultado = revisar_pedido(params, session_attrs)
+    if not resultado.get("sucesso"):
+        return resultado
+
+    resultado["pedido_id"] = f"PED-{uuid.uuid4().hex[:8].upper()}"
+    resultado["cliente"] = params.get("nome_cliente")
+    obs = (params.get("observacoes") or "").strip()
+    if obs:
+        resultado["observacoes"] = obs
+
+    session_attrs.pop(CHAVE, None)
+    return resultado

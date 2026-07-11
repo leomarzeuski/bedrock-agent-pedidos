@@ -1,24 +1,15 @@
-"""Montagem, cotacao e registro de um pedido.
-
-Regras (todas bloqueiam o pedido com erro explicativo):
-- a loja precisa existir e estar aberta no horario atual;
-- o CEP precisa ser valido;
-- cada item precisa existir, ser vendido naquela loja e estar na janela de horario.
+"""Parsing e precificacao de itens — o motor de precos do carrinho.
 
 Precos: pizza = tamanho escolhido (meio-a-meio = sabor mais caro) + borda;
-combo = preco fixo; demais = preco do item. Frete e fixo por loja.
-
-cotar_pedido calcula tudo sem registrar (para montar o resumo); criar_pedido
-faz a mesma validacao e gera o numero do pedido.
+combo = preco fixo; demais = preco do item. Nao registra nada — quem monta e
+fecha o pedido e o modulo carrinho.
 """
 
-import uuid
-
 import geo
-from dados import BORDAS, LOJAS, get_item
+from dados import BORDAS, get_item
 
 
-def _parse_itens(texto):
+def parse_itens(texto):
     """Converte o texto do pedido em lista de itens.
 
     Itens separados por ';', campos por '|' na ordem:
@@ -78,6 +69,25 @@ def _monta_linha(produto, pedido_item, loja_id):
     qtd = int(pedido_item.get("qtd", 1))
     if qtd < 1:
         return None, f"Quantidade invalida para {produto['nome']}"
+    obs = (pedido_item.get("obs") or "").strip()
+
+    # Salgados sao vendidos por peso: aqui a "quantidade" (qtd) e em gramas.
+    if produto["tipo"] == "peso":
+        gramas = qtd
+        minimo = produto.get("minimo_g", 0)
+        if gramas < minimo:
+            return None, f"{produto['nome']} tem pedido minimo de {minimo}g (voce pediu {gramas}g)"
+        preco = produto["preco_por_kg"] * gramas / 1000
+        linha = {
+            "item": f"{produto['nome']} ({gramas}g)",
+            "qtd": 1,
+            "gramas": gramas,
+            "preco_kg": produto["preco_por_kg"],
+            "subtotal": round(preco, 2),
+        }
+        if obs:
+            linha["obs"] = obs
+        return linha, None
 
     if produto["tipo"] == "pizza":
         tamanho = (pedido_item.get("tamanho") or "").strip().lower()
@@ -103,80 +113,30 @@ def _monta_linha(produto, pedido_item, loja_id):
         "preco_unitario": round(preco, 2),
         "subtotal": round(preco * qtd, 2),
     }
-    obs = (pedido_item.get("obs") or "").strip()
     if obs:
         linha["obs"] = obs
     return linha, None
 
 
-def _montar(params):
-    """Valida e precifica o pedido. Retorna o resumo (sem numero) ou um erro."""
-    loja_id = (params.get("loja") or "").strip().upper()
-    loja = LOJAS.get(loja_id)
-    if not loja:
-        return {"sucesso": False, "erro": f"Loja invalida. Escolha entre: {', '.join(LOJAS)}"}
+def precificar(loja_id, itens):
+    """Valida e precifica os itens na loja. Retorna (linhas, subtotal, erro).
 
-    if not geo.loja_aberta(loja):
-        return {"sucesso": False,
-                "erro": f"A loja {loja['nome']} esta fechada agora. Horario: {loja['horario_texto']}"}
-
-    endereco = geo.consultar_cep(params.get("cep", ""))
-    if not endereco.get("valido"):
-        return {"sucesso": False, "erro": endereco.get("erro", "CEP invalido")}
-
-    itens = _parse_itens(params.get("itens", ""))
-    if not itens:
-        return {"sucesso": False, "erro": "Pedido sem itens"}
-
-    resumo = []
+    Valida existencia do item, se e vendido na loja e se esta na janela de horario.
+    """
+    linhas = []
     subtotal = 0.0
     for pedido_item in itens:
         produto = get_item(pedido_item.get("id"))
         if not produto:
-            return {"sucesso": False, "erro": f"Item inexistente: {pedido_item.get('id')}"}
+            return None, 0.0, f"Item inexistente: {pedido_item.get('id')}"
         if loja_id not in produto["lojas"]:
-            return {"sucesso": False,
-                    "erro": f"{produto['nome']} nao esta disponivel na loja {loja['nome']}"}
+            return None, 0.0, f"{produto['nome']} nao esta disponivel nesta loja"
         if not geo.item_disponivel(produto):
-            return {"sucesso": False,
-                    "erro": (f"{produto['nome']} so esta disponivel das "
-                             f"{produto['disponivel_de']} as {produto['disponivel_ate']}")}
-
+            return None, 0.0, (f"{produto['nome']} so esta disponivel das "
+                               f"{produto['disponivel_de']} as {produto['disponivel_ate']}")
         linha, erro = _monta_linha(produto, pedido_item, loja_id)
         if erro:
-            return {"sucesso": False, "erro": erro}
-        resumo.append(linha)
+            return None, 0.0, erro
+        linhas.append(linha)
         subtotal += linha["subtotal"]
-
-    entrega = geo.frete_da_loja(loja, subtotal)
-    resultado = {
-        "sucesso": True,
-        "loja": loja["nome"],
-        "cliente": params.get("nome_cliente"),
-        "endereco_entrega": endereco["endereco"],
-        "itens": resumo,
-        "subtotal": round(subtotal, 2),
-        "frete": entrega["frete"],
-        "frete_gratis": entrega["gratis"],
-        "total": round(subtotal + entrega["frete"], 2),
-    }
-    observacoes = (params.get("observacoes") or "").strip()
-    if observacoes:
-        resultado["observacoes"] = observacoes
-    return resultado
-
-
-def cotar_pedido(params):
-    """Calcula o preco exato do pedido (para o resumo) sem registrar."""
-    resultado = _montar(params)
-    if resultado.get("sucesso"):
-        resultado["cotacao"] = True
-    return resultado
-
-
-def criar_pedido(params):
-    """Registra o pedido, gerando o numero. Revalida tudo antes."""
-    resultado = _montar(params)
-    if resultado.get("sucesso"):
-        resultado["pedido_id"] = f"PED-{uuid.uuid4().hex[:8].upper()}"
-    return resultado
+    return linhas, round(subtotal, 2), None

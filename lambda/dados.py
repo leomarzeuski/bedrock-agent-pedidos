@@ -4,7 +4,37 @@ O cardapio em si (≈110 itens) fica em cardapio_itens.py, gerado a parte,
 pra manter este arquivo enxuto e legivel.
 """
 
-from cardapio_itens import ITENS as CARDAPIO
+from cardapio_itens import ITENS
+
+# Salgados vendidos por peso: preco por kg, e a quantidade no pedido e em gramas.
+SALGADOS = [
+    {"id": "sg01", "categoria": "salgados", "tipo": "peso", "nome": "Mini Coxinha de Frango",
+     "descricao": "Massa crocante recheada com frango desfiado temperado", "lojas": ["A", "B"],
+     "preco_por_kg": 59.90, "minimo_g": 250},
+    {"id": "sg02", "categoria": "salgados", "tipo": "peso", "nome": "Mini Kibe",
+     "descricao": "Bolinho de trigo com carne moida e temperos arabes", "lojas": ["A", "B"],
+     "preco_por_kg": 54.90, "minimo_g": 250},
+    {"id": "sg03", "categoria": "salgados", "tipo": "peso", "nome": "Mini Empada de Frango",
+     "descricao": "Massa amanteigada com recheio cremoso de frango", "lojas": ["A", "B"],
+     "preco_por_kg": 62.90, "minimo_g": 250},
+    {"id": "sg04", "categoria": "salgados", "tipo": "peso", "nome": "Bolinha de Queijo",
+     "descricao": "Bolinha empanada e recheada de queijo derretido", "lojas": ["A", "B"],
+     "preco_por_kg": 57.90, "minimo_g": 250},
+    {"id": "sg05", "categoria": "salgados", "tipo": "peso", "nome": "Mini Esfiha de Carne",
+     "descricao": "Massa macia aberta com carne temperada", "lojas": ["A", "B"],
+     "preco_por_kg": 56.90, "minimo_g": 250},
+    {"id": "sg06", "categoria": "salgados", "tipo": "peso", "nome": "Mini Enroladinho de Salsicha",
+     "descricao": "Massa folhada envolvendo salsicha", "lojas": ["A", "B"],
+     "preco_por_kg": 52.90, "minimo_g": 250},
+    {"id": "sg07", "categoria": "salgados", "tipo": "peso", "nome": "Risole de Presunto e Queijo",
+     "descricao": "Massa empanada recheada de presunto e queijo", "lojas": ["A", "B"],
+     "preco_por_kg": 58.90, "minimo_g": 250},
+    {"id": "sg08", "categoria": "salgados", "tipo": "peso", "nome": "Mini Pastel de Queijo",
+     "descricao": "Pastelzinho frito e crocante recheado de queijo", "lojas": ["A", "B"],
+     "preco_por_kg": 55.90, "minimo_g": 250},
+]
+
+CARDAPIO = ITENS + SALGADOS
 
 # Bordas de pizza e o adicional de cada uma (R$).
 BORDAS = {
@@ -20,6 +50,7 @@ CATEGORIAS = {
     "hamburgueres": "Hamburgueres",
     "combos": "Combos",
     "porcoes": "Porcoes",
+    "salgados": "Salgados (por kg)",
     "massas": "Massas",
     "japonesa": "Japonesa",
     "saladas": "Saladas",

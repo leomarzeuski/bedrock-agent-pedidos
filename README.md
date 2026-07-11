@@ -1,6 +1,8 @@
 # Bedrock Agent — Agente de Pedidos (estudo)
 
-Agente de delivery no Amazon Bedrock: **2 lojas**, **~110 itens** em 10 categorias, pizzas **meio a meio** com borda e tamanho, **combos**, observações por item e por pedido, horários de funcionamento por loja, janelas de disponibilidade por item e frete por loja. Foundation model **Amazon Nova Lite**; a lógica de negócio roda num action group Lambda em Python (stdlib apenas).
+> 📋 [Avaliação completa do repo (2026-07-11)](docs/avaliacao-2026-07-11.md) — bugs confirmados, gaps para "atendente completo de padaria" e roadmap.
+
+Agente de delivery no Amazon Bedrock: **2 lojas**, **~118 itens** em 11 categorias, pizzas **meio a meio** com borda e tamanho, **combos**, **salgados vendidos por kg** (pedidos em gramas), observações por item e por pedido, horários de funcionamento por loja, janelas de disponibilidade por item e frete por loja. Foundation model **Amazon Nova Lite**; a lógica de negócio roda num action group Lambda em Python (stdlib apenas).
 
 ## Arquitetura
 
@@ -21,17 +23,20 @@ Lambda modularizada (`lambda/`):
 - `dados.py` — as 2 lojas, bordas e categorias; importa o cardápio
 - `cardapio_itens.py` — os ~110 itens (gerado)
 - `geo.py` — horários, disponibilidade de item, validação de CEP (ViaCEP) e frete
-- `pedido.py` — validação e precificação; `cotar_pedido` (dry-run) e `criar_pedido`
+- `pedido.py` — motor de preços: parsing dos itens, validação e precificação
+- `carrinho.py` — carrinho na sessão (adicionar/ver/limpar/revisar/finalizar)
 
 ### Funções do action group
 
 1. `consultar_cardapio(categoria?, loja?)` — sem categoria, lista as categorias; com categoria, os itens (filtra por loja).
 2. `listar_lojas()` — as 2 lojas com endereço, horário, se estão abertas agora e frete.
-3. `validar_cep(cep)` — valida e retorna o endereço (ViaCEP).
-4. `cotar_pedido(loja, itens, cep, observacoes?)` — calcula itens/subtotal/frete/total **sem registrar** (é o que monta o resumo).
-5. `criar_pedido(loja, itens, cep, nome_cliente, observacoes?)` — revalida e registra, gerando o número.
+3. `adicionar_itens(itens, loja?)` — adiciona itens ao carrinho e devolve o carrinho com preços, a loja e se ela está aberta. Se a loja não for informada, escolhe automaticamente uma loja **aberta** que tenha os itens (e avisa se só houver loja fechada).
+4. `ver_carrinho()` — mostra o que já foi escolhido, com preços.
+5. `limpar_carrinho()` — esvazia o carrinho.
+6. `revisar_pedido(cep)` — resumo final com frete e total, **sem registrar**.
+7. `finalizar_pedido(cep, nome_cliente, observacoes?)` — revalida e registra, gerando o número.
 
-`criar_pedido`/`cotar_pedido` **recusam** com motivo explicado: loja fechada, item fora do horário, item de outra loja, ou CEP inválido.
+O carrinho fica em `sessionAttributes`, que o Bedrock mantém entre os turnos — a Lambda é a dona dos itens, então nada se perde na conversa. As funções **recusam** com motivo explicado: loja fechada, item fora do horário, item de outra loja, ou CEP inválido.
 
 ## Modelo
 

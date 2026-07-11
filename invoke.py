@@ -14,7 +14,7 @@ client = boto3.client(
 )
 
 agent_id = os.environ.get("AGENT_ID", "1B0CRSOXZ3")
-alias_id = os.environ.get("ALIAS_ID", "YLMKONTXKO")
+alias_id = os.environ.get("ALIAS_ID", "M57OUWSDFF")
 session_id = sys.argv[2] if len(sys.argv) > 2 else f"cli-{uuid.uuid4().hex[:8]}"
 
 # Erros transientes do Bedrock que valem retentar (a propria API pede "try again").
