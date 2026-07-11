@@ -13,11 +13,38 @@ import geo
 from dados import CARDAPIO, CATEGORIAS, LOJAS
 
 
+def _normalizar(texto):
+    """minusculo, sem acento, sem espaco nas bordas — para comparar nomes de loja."""
+    import unicodedata
+    texto = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode()
+    return texto.strip().lower()
+
+
+def _resolver_loja(texto):
+    """Aceita 'A'/'B' ou o nome da loja (case/acento insensivel). Retorna o
+    id ou None se nao reconhecer."""
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+    if texto.upper() in LOJAS:
+        return texto.upper()
+    normalizado = _normalizar(texto)
+    for loja in LOJAS.values():
+        if _normalizar(loja["nome"]) == normalizado:
+            return loja["id"]
+    return None
+
+
 def consultar_cardapio(params):
     """Sem categoria: lista as categorias. Com categoria: itens da categoria,
-    opcionalmente filtrados pela loja."""
+    opcionalmente filtrados pela loja (aceita id A/B ou o nome da loja)."""
     categoria = (params.get("categoria") or "").strip().lower()
-    loja_id = (params.get("loja") or "").strip().upper() or None
+    loja_bruta = (params.get("loja") or "").strip()
+    loja_id = None
+    if loja_bruta:
+        loja_id = _resolver_loja(loja_bruta)
+        if not loja_id:
+            return {"erro": f"Loja invalida: '{loja_bruta}'. Use listar_lojas para ver as lojas existentes."}
 
     if not categoria:
         return {
@@ -33,23 +60,26 @@ def consultar_cardapio(params):
             continue
         if loja_id and loja_id not in it["lojas"]:
             continue
-        # Disponivel agora = dentro da janela do item E com alguma loja dele aberta.
+        # Com filtro de loja, disponibilidade considera SO a loja filtrada
+        # (senao "disponivel_agora" fica contraditorio com adicionar_itens).
+        lojas_relevantes = [loja_id] if loja_id else it["lojas"]
         na_janela = geo.item_disponivel(it)
-        loja_aberta = any(geo.loja_aberta(LOJAS[l]) for l in it["lojas"])
+        loja_aberta_agora = any(geo.loja_aberta(LOJAS[l]) for l in lojas_relevantes)
         registro = {
             "id": it["id"],
             "nome": it["nome"],
             "descricao": it["descricao"],
             "lojas": it["lojas"],
-            "disponivel_agora": na_janela and loja_aberta,
+            "disponivel_agora": na_janela and loja_aberta_agora,
         }
         if not registro["disponivel_agora"]:
+            lojas_txt = "; ".join(f"{LOJAS[l]['nome']} ({LOJAS[l]['horario_texto']})"
+                                  for l in lojas_relevantes)
             if not na_janela:
                 registro["obs_disponibilidade"] = (
-                    f"disponivel so das {it['disponivel_de']} as {it['disponivel_ate']}")
+                    f"disponivel so das {it['disponivel_de']} as {it['disponivel_ate']}; "
+                    f"vendido na {lojas_txt}")
             else:
-                lojas_txt = "; ".join(f"{LOJAS[l]['nome']} ({LOJAS[l]['horario_texto']})"
-                                      for l in it["lojas"])
                 registro["obs_disponibilidade"] = f"vendido so na {lojas_txt}, fechada agora"
         if it["tipo"] == "pizza":
             registro["tamanhos"] = it["tamanhos"]
@@ -85,29 +115,34 @@ def listar_lojas():
 
 def lambda_handler(event, context):
     function = event.get("function", "")
-    params = {p["name"]: p["value"] for p in event.get("parameters", [])}
+    params = {p["name"]: p.get("value", "") for p in event.get("parameters", [])}
     session_attrs = dict(event.get("sessionAttributes") or {})
 
-    if function == "consultar_cardapio":
-        result = consultar_cardapio(params)
-    elif function == "listar_lojas":
-        result = listar_lojas()
-    elif function == "adicionar_itens":
-        result = carrinho.adicionar_itens(params, session_attrs)
-    elif function == "ver_carrinho":
-        result = carrinho.ver_carrinho(session_attrs)
-    elif function == "remover_item":
-        result = carrinho.remover_item(params, session_attrs)
-    elif function == "alterar_quantidade":
-        result = carrinho.alterar_quantidade(params, session_attrs)
-    elif function == "limpar_carrinho":
-        result = carrinho.limpar_carrinho(session_attrs)
-    elif function == "revisar_pedido":
-        result = carrinho.revisar_pedido(params, session_attrs)
-    elif function == "finalizar_pedido":
-        result = carrinho.finalizar_pedido(params, session_attrs)
-    else:
-        result = {"erro": f"Funcao desconhecida: {function}"}
+    try:
+        if function == "consultar_cardapio":
+            result = consultar_cardapio(params)
+        elif function == "listar_lojas":
+            result = listar_lojas()
+        elif function == "adicionar_itens":
+            result = carrinho.adicionar_itens(params, session_attrs)
+        elif function == "ver_carrinho":
+            result = carrinho.ver_carrinho(session_attrs)
+        elif function == "remover_item":
+            result = carrinho.remover_item(params, session_attrs)
+        elif function == "alterar_quantidade":
+            result = carrinho.alterar_quantidade(params, session_attrs)
+        elif function == "limpar_carrinho":
+            result = carrinho.limpar_carrinho(session_attrs)
+        elif function == "revisar_pedido":
+            result = carrinho.revisar_pedido(params, session_attrs)
+        elif function == "finalizar_pedido":
+            result = carrinho.finalizar_pedido(params, session_attrs)
+        else:
+            result = {"erro": f"Funcao desconhecida: {function}"}
+    except Exception as exc:
+        print(json.dumps({"evento": "erro_dispatch", "function": function, "erro": str(exc)},
+                          ensure_ascii=False))
+        result = {"erro": "Erro interno ao processar o pedido. Tente novamente."}
 
     return {
         "messageVersion": "1.0",

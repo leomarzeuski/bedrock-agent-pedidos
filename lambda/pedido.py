@@ -1,12 +1,23 @@
 """Parsing e precificacao de itens — o motor de precos do carrinho.
 
 Precos: pizza = tamanho escolhido (meio-a-meio = sabor mais caro) + borda;
-combo = preco fixo; demais = preco do item. Nao registra nada — quem monta e
-fecha o pedido e o modulo carrinho.
+combo = preco fixo; demais = preco do item. Dinheiro em Decimal com
+arredondamento ROUND_HALF_UP em todo o calculo, convertido para float so na
+saida (json nao serializa Decimal). Nao registra nada — quem monta e fecha o
+pedido e o modulo carrinho.
 """
+
+from decimal import Decimal, ROUND_HALF_UP
 
 import geo
 from dados import BORDAS, get_item
+
+DUAS_CASAS = Decimal("0.01")
+
+
+def _dinheiro(valor):
+    """Converte numero (int/float/str) para Decimal com 2 casas, half-up."""
+    return Decimal(str(valor)).quantize(DUAS_CASAS, rounding=ROUND_HALF_UP)
 
 
 def parse_quantidade(texto):
@@ -49,37 +60,66 @@ def parse_itens(texto):
 
     Itens separados por ';', campos por '|' na ordem:
     id|qtd|tamanho|borda|meio_a_meio|obs. Apenas o id e obrigatorio;
-    tamanho/borda/meio_a_meio valem so para pizza (meio_a_meio = id do 2o sabor).
+    tamanho/borda/meio_a_meio valem so para pizza (meio_a_meio = id do 2o
+    sabor) — para os demais itens, texto nesses campos e preservado como
+    observacao em vez de descartado. Obs junta tudo a partir do 5o campo
+    (join com '|') para nao truncar observacoes que contenham '|'.
     Ex.: "bb05|3 ; hb01|2 ; pz04|1|grande|catupiry|pz01|caprichar no queijo"
+
+    Retorna (itens, erro). Em caso de erro (ex.: quantidade invalida), itens
+    e None.
     """
     itens = []
     for bloco in texto.split(";"):
+        bloco = bloco.strip()
+        if not bloco:
+            continue
         campos = [c.strip() for c in bloco.split("|")]
         item_id = campos[0]
         if not item_id:
             continue
-        item = {"id": item_id}
-        qtd = campos[1] if len(campos) > 1 else ""
-        item["qtd"] = int(qtd) if qtd.isdigit() else 1
-        if len(campos) > 2 and campos[2]:
-            item["tamanho"] = campos[2]
-        if len(campos) > 3 and campos[3]:
-            item["borda"] = campos[3]
-        if len(campos) > 4 and campos[4]:
-            item["meio_a_meio"] = [item_id, campos[4]]
-        if len(campos) > 5 and campos[5]:
-            item["obs"] = campos[5]
+
+        campo_qtd = campos[1] if len(campos) > 1 and campos[1] else "1"
+        qtd, erro = parse_quantidade(campo_qtd)
+        if erro:
+            return None, f"Item {item_id}: {erro}"
+
+        item = {"id": item_id, "qtd": qtd}
+        produto = get_item(item_id)
+
+        tamanho = campos[2] if len(campos) > 2 else ""
+        borda = campos[3] if len(campos) > 3 else ""
+        segundo_sabor = campos[4] if len(campos) > 4 else ""
+        obs = "|".join(campos[5:]) if len(campos) > 5 else ""
+
+        if produto and produto.get("tipo") == "pizza":
+            if tamanho:
+                item["tamanho"] = tamanho
+            if borda:
+                item["borda"] = borda
+            if segundo_sabor:
+                item["meio_a_meio"] = [item_id, segundo_sabor]
+        else:
+            # Tamanho/borda/meio_a_meio nao se aplicam a este item: preserva
+            # como observacao em vez de descartar (ex.: "hb01|2|sem picles"
+            # nao pode sumir so porque o campo esta na posicao errada).
+            perdidos = [c for c in (tamanho, borda, segundo_sabor) if c]
+            if perdidos:
+                obs = " | ".join(perdidos + ([obs] if obs else []))
+
+        if obs:
+            item["obs"] = obs
         itens.append(item)
-    return itens
+    return itens, None
 
 
 def _preco_pizza(produto, tamanho, meio_a_meio, loja_id):
-    """Retorna (preco_base, [sabores]) ou (None, mensagem_erro)."""
+    """Retorna (preco_base: Decimal, [sabores]) ou (None, mensagem_erro)."""
     if tamanho not in produto["tamanhos"]:
         opcoes = ", ".join(produto["tamanhos"])
         return None, f"Tamanho invalido para {produto['nome']}. Opcoes: {opcoes}"
 
-    precos = [produto["tamanhos"][tamanho]]
+    precos = [_dinheiro(produto["tamanhos"][tamanho])]
     sabores = [produto["nome"]]
 
     for outro_id in meio_a_meio or []:
@@ -92,7 +132,7 @@ def _preco_pizza(produto, tamanho, meio_a_meio, loja_id):
             return None, f"O sabor {outro['nome']} nao esta disponivel nesta loja"
         if tamanho not in outro["tamanhos"]:
             return None, f"O sabor {outro['nome']} nao tem o tamanho {tamanho}"
-        precos.append(outro["tamanhos"][tamanho])
+        precos.append(_dinheiro(outro["tamanhos"][tamanho]))
         sabores.append(outro["nome"])
 
     # Meio-a-meio cobra pelo sabor mais caro.
@@ -112,13 +152,14 @@ def _monta_linha(produto, pedido_item, loja_id):
         minimo = produto.get("minimo_g", 0)
         if gramas < minimo:
             return None, f"{produto['nome']} tem pedido minimo de {minimo}g (voce pediu {gramas}g)"
-        preco = produto["preco_por_kg"] * gramas / 1000
+        preco = (_dinheiro(produto["preco_por_kg"]) * gramas / Decimal(1000)).quantize(
+            DUAS_CASAS, rounding=ROUND_HALF_UP)
         linha = {
             "item": f"{produto['nome']} ({gramas}g)",
             "qtd": 1,
             "gramas": gramas,
-            "preco_kg": produto["preco_por_kg"],
-            "subtotal": round(preco, 2),
+            "preco_kg": float(_dinheiro(produto["preco_por_kg"])),
+            "subtotal": float(preco),
         }
         if obs:
             linha["obs"] = obs
@@ -132,21 +173,22 @@ def _monta_linha(produto, pedido_item, loja_id):
         borda = (pedido_item.get("borda") or "sem").strip().lower()
         if borda not in BORDAS:
             return None, f"Borda invalida. Opcoes: {', '.join(BORDAS)}"
-        preco += BORDAS[borda]
+        preco += _dinheiro(BORDAS[borda])
         nome = f"Pizza {'/'.join(sabores)} ({tamanho}"
         nome += f", borda {borda})" if borda != "sem" else ")"
     elif produto["tipo"] == "combo":
-        preco = produto["preco"]
+        preco = _dinheiro(produto["preco"])
         nome = f"{produto['nome']} (combo)"
     else:
-        preco = produto["preco"]
+        preco = _dinheiro(produto["preco"])
         nome = produto["nome"]
 
+    subtotal = (preco * qtd).quantize(DUAS_CASAS, rounding=ROUND_HALF_UP)
     linha = {
         "item": nome,
         "qtd": qtd,
-        "preco_unitario": round(preco, 2),
-        "subtotal": round(preco * qtd, 2),
+        "preco_unitario": float(preco),
+        "subtotal": float(subtotal),
     }
     if obs:
         linha["obs"] = obs
@@ -156,10 +198,11 @@ def _monta_linha(produto, pedido_item, loja_id):
 def precificar(loja_id, itens):
     """Valida e precifica os itens na loja. Retorna (linhas, subtotal, erro).
 
-    Valida existencia do item, se e vendido na loja e se esta na janela de horario.
+    Valida existencia do item, se e vendido na loja e se esta na janela de
+    horario.
     """
     linhas = []
-    subtotal = 0.0
+    subtotal = Decimal("0.00")
     for pedido_item in itens:
         produto = get_item(pedido_item.get("id"))
         if not produto:
@@ -173,5 +216,5 @@ def precificar(loja_id, itens):
         if erro:
             return None, 0.0, erro
         linhas.append(linha)
-        subtotal += linha["subtotal"]
-    return linhas, round(subtotal, 2), None
+        subtotal += _dinheiro(linha["subtotal"])
+    return linhas, float(subtotal), None

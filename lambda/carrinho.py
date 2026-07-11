@@ -37,13 +37,18 @@ def _lojas_efetivas(pedido_item):
     return set.intersection(*conjuntos) if conjuntos else set()
 
 
+def _lojas_candidatas(novos):
+    """Lojas que vendem TODOS os itens do pedido (independente de estar aberta)."""
+    return [lid for lid in LOJAS if all(lid in _lojas_efetivas(i) for i in novos)]
+
+
 def _escolher_loja(novos, forcada):
     """Escolhe a loja para itens num carrinho vazio. Retorna (loja_id, erro).
 
     Prefere uma loja aberta que venda TODOS os itens. Se a pessoa indicou uma
     loja (forcada), respeita — desde que ela tenha os itens.
     """
-    candidatas = [lid for lid in LOJAS if all(lid in _lojas_efetivas(i) for i in novos)]
+    candidatas = _lojas_candidatas(novos)
     if not candidatas:
         return None, ("Esses itens nao estao todos na mesma loja. Um pedido e de uma loja so — "
                       "posso comecar por uma e depois fazer outro pedido.")
@@ -105,7 +110,9 @@ def _mesclar_itens(existentes, novos):
 
 
 def adicionar_itens(params, session_attrs):
-    novos = pedido.parse_itens(params.get("itens", ""))
+    novos, erro = pedido.parse_itens(params.get("itens", ""))
+    if erro:
+        return {"sucesso": False, "erro": erro}
     if not novos:
         return {"sucesso": False, "erro": "Nenhum item informado"}
     for it in novos:
@@ -119,8 +126,14 @@ def adicionar_itens(params, session_attrs):
 
     cart = _carregar(session_attrs)
     if cart["itens"]:
-        # Carrinho ja tem loja: os novos itens precisam ser dela.
+        # Carrinho ja tem loja: os novos itens (e uma loja forcada, se houver)
+        # precisam ser dela — nunca ignorar em silencio.
         loja_id = cart["loja"]
+        if forcada and forcada != loja_id:
+            return {"sucesso": False,
+                    "erro": (f"Seu carrinho ja esta com itens da {LOJAS[loja_id]['nome']}. Um pedido "
+                             f"e de uma loja so: finalize ou limpe o carrinho antes de pedir da "
+                             f"{LOJAS[forcada]['nome']}.")}
         fora = [get_item(i["id"])["nome"] for i in novos if loja_id not in _lojas_efetivas(i)]
         if fora:
             return {"sucesso": False,
@@ -135,6 +148,14 @@ def adicionar_itens(params, session_attrs):
     # Loja fechada: nao aceita pedido (nao monta carrinho que nao fecha).
     loja = LOJAS[loja_id]
     if not geo.loja_aberta(loja):
+        candidatas = _lojas_candidatas(novos)
+        abertas = [LOJAS[lid] for lid in candidatas if lid != loja_id and geo.loja_aberta(LOJAS[lid])]
+        if abertas:
+            nomes = ", ".join(l["nome"] for l in abertas)
+            return {"sucesso": False, "loja_fechada": True, "loja": loja["nome"],
+                    "horario": loja["horario_texto"],
+                    "erro": (f"A {loja['nome']} esta fechada agora ({loja['horario_texto']}). Esses "
+                             f"itens tambem tem na {nomes}, que esta aberta agora — quer pedir de la?")}
         return {"sucesso": False, "loja_fechada": True, "loja": loja["nome"],
                 "horario": loja["horario_texto"],
                 "erro": (f"A {loja['nome']} esta fechada agora ({loja['horario_texto']}). Esse item so "
@@ -151,6 +172,9 @@ def adicionar_itens(params, session_attrs):
     _salvar(session_attrs, cart)
 
     resultado = _resumo(cart)
+    if "erro" in resultado:
+        return {"sucesso": False,
+                "erro": f"Item adicionado, mas o carrinho ficou invalido: {resultado['erro']}"}
     resultado["sucesso"] = True
     resultado["mensagem"] = "Itens adicionados. Deseja mais alguma coisa ou fechar o pedido?"
     return resultado
@@ -247,6 +271,10 @@ def revisar_pedido(params, session_attrs):
     endereco = geo.consultar_cep(params.get("cep", ""))
     if not endereco.get("valido"):
         return {"sucesso": False, "erro": endereco.get("erro", "CEP invalido")}
+    if not geo.area_atendida(loja, endereco["endereco"]):
+        return {"sucesso": False,
+                "erro": (f"Esse CEP fica fora da area de entrega da {loja['nome']} "
+                         f"(atende {loja['cidade']}/{loja['uf']}). Nao da pra entregar ai.")}
 
     linhas, subtotal, erro = pedido.precificar(cart["loja"], cart["itens"])
     if erro:

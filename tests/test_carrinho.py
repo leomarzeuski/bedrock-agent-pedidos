@@ -167,3 +167,56 @@ def test_finalizar_pedido_chamado_2x_e_idempotente(monkeypatch, capsys):
     assert segundo["ja_finalizado"] is True
     assert segundo["pedido_id"] == primeiro["pedido_id"]
     assert capsys.readouterr().out == ""  # 2a chamada nao gera novo log
+
+
+def test_loja_forcada_diferente_da_do_carrinho_da_erro_explicito(monkeypatch):
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+    carrinho.adicionar_itens({"itens": "hb01|1", "loja": "A"}, session_attrs)
+
+    resultado = carrinho.adicionar_itens({"itens": "hb02|1", "loja": "B"}, session_attrs)
+
+    assert resultado["sucesso"] is False
+    assert "loja" in resultado["erro"].lower()
+
+
+def test_loja_fechada_sugere_loja_aberta_alternativa(monkeypatch):
+    # pz02 (Calabresa) existe em A e B; se so B estiver "aberta" no momento
+    # simulado e a pessoa pedir explicitamente a A (fechada), deve sugerir B.
+    momento_so_b_aberta = datetime(2026, 7, 14, 10, 0, tzinfo=geo.TZ)  # terca 10h: A fechada, B aberta
+    monkeypatch.setattr(geo, "agora", lambda: momento_so_b_aberta)
+    session_attrs = {}
+
+    resultado = carrinho.adicionar_itens({"itens": "pz02|1|media", "loja": "A"}, session_attrs)
+
+    assert resultado["sucesso"] is False
+    assert resultado["loja_fechada"] is True
+    assert "burger jardins" in resultado["erro"].lower()
+
+
+def test_adicionar_itens_nunca_devolve_sucesso_true_com_erro(monkeypatch):
+    # cf01 (cafe da manha) so esta disponivel 07:00-11:00. Adiciona dentro da
+    # janela, depois o tempo "passa" e um segundo add deve reportar que o
+    # carrinho ficou invalido, sem alegar sucesso.
+    session_attrs = {}
+    monkeypatch.setattr(geo, "agora", lambda: datetime(2026, 7, 14, 8, 0, tzinfo=geo.TZ))
+    r1 = carrinho.adicionar_itens({"itens": "cf01|1"}, session_attrs)
+    assert r1["sucesso"] is True
+
+    monkeypatch.setattr(geo, "agora", lambda: datetime(2026, 7, 14, 12, 0, tzinfo=geo.TZ))
+    r2 = carrinho.adicionar_itens({"itens": "bb01|1"}, session_attrs)
+
+    assert r2["sucesso"] is False
+    assert not (r2.get("sucesso") is True and "erro" in r2)  # nunca sucesso=True junto com erro
+    assert r2.get("sucesso") is False
+
+
+def test_revisar_pedido_fora_da_area_de_entrega_da_erro(monkeypatch):
+    from conftest import mock_cep_valido
+    mock_cep_valido(monkeypatch, cidade="Manaus", uf="AM")
+    session_attrs = _carrinho_com_pizza(monkeypatch)
+
+    resultado = carrinho.revisar_pedido({"cep": "69020030"}, session_attrs)
+
+    assert resultado["sucesso"] is False
+    assert "area de entrega" in resultado["erro"].lower()
