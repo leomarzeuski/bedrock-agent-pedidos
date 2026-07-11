@@ -203,8 +203,11 @@ def finalizar_pedido(params, session_attrs):
         "loja": resultado["loja"],
         "itens": resultado["itens"],
         "endereco": resultado["endereco_entrega"],
+        "subtotal": resultado["subtotal"],
+        "frete": resultado["frete"],
         "total": resultado["total"],
         "cliente": resultado["cliente"],
+        "observacoes": resultado.get("observacoes"),
         "timestamp": geo.agora().isoformat(),
     }, ensure_ascii=False))
 

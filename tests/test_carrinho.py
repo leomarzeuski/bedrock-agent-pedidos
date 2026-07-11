@@ -25,7 +25,8 @@ def test_finalizar_pedido_loga_evento_estruturado(monkeypatch, capsys):
     session_attrs = _carrinho_com_pizza(monkeypatch)
 
     resultado = carrinho.finalizar_pedido(
-        {"cep": "01310100", "nome_cliente": "Ana"}, session_attrs)
+        {"cep": "01310100", "nome_cliente": "Ana", "observacoes": "deixar na portaria"},
+        session_attrs)
 
     assert resultado["sucesso"] is True
     assert resultado["pedido_id"].startswith("PED-")
@@ -37,6 +38,21 @@ def test_finalizar_pedido_loga_evento_estruturado(monkeypatch, capsys):
     assert linha["cliente"] == "Ana"
     assert linha["total"] == resultado["total"]
     assert linha["loja"] == resultado["loja"]
+    assert linha["subtotal"] == resultado["subtotal"]
+    assert linha["frete"] == resultado["frete"]
+    assert linha["observacoes"] == "deixar na portaria"
+
+
+def test_finalizar_pedido_loga_observacoes_como_none_quando_ausente(monkeypatch, capsys):
+    mock_cep_valido(monkeypatch)
+    session_attrs = _carrinho_com_pizza(monkeypatch)
+
+    carrinho.finalizar_pedido(
+        {"cep": "01310100", "nome_cliente": "Ana"}, session_attrs)
+
+    saida = capsys.readouterr().out.strip().splitlines()
+    linha = json.loads(saida[-1])
+    assert linha["observacoes"] is None
 
 
 def test_finalizar_pedido_guarda_ultimo_pedido_na_sessao_e_esvazia_carrinho(monkeypatch):
