@@ -7,6 +7,7 @@ saida (json nao serializa Decimal). Nao registra nada — quem monta e fecha o
 pedido e o modulo carrinho.
 """
 
+import math
 from decimal import Decimal, ROUND_HALF_UP
 
 import geo
@@ -45,6 +46,9 @@ def parse_quantidade(texto):
         bruto_float = float(numero)
     except ValueError:
         return None, f"Quantidade invalida: '{texto}'. Informe um numero, ex.: '2' ou, para itens por peso, '500g'"
+
+    if not math.isfinite(bruto_float):
+        return None, f"Quantidade invalida: '{texto}'"
 
     if not aceita_decimal and bruto_float != int(bruto_float):
         return None, f"Quantidade invalida: '{texto}'. Informe um numero, ex.: '2' ou, para itens por peso, '500g'"

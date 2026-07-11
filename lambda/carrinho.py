@@ -281,6 +281,7 @@ def revisar_pedido(params, session_attrs):
         return {"sucesso": False, "erro": erro}
 
     entrega = geo.frete_da_loja(loja, subtotal)
+    total = pedido._dinheiro(subtotal) + pedido._dinheiro(entrega["frete"])
     return {
         "sucesso": True,
         "loja": loja["nome"],
@@ -289,7 +290,7 @@ def revisar_pedido(params, session_attrs):
         "subtotal": subtotal,
         "frete": entrega["frete"],
         "frete_gratis": entrega["gratis"],
-        "total": round(subtotal + entrega["frete"], 2),
+        "total": float(total),
     }
 
 
@@ -330,6 +331,7 @@ def finalizar_pedido(params, session_attrs):
         "endereco": resultado["endereco_entrega"],
         "subtotal": resultado["subtotal"],
         "frete": resultado["frete"],
+        "frete_gratis": resultado["frete_gratis"],
         "total": resultado["total"],
         "cliente": resultado["cliente"],
         "observacoes": resultado.get("observacoes"),

@@ -13,13 +13,6 @@ import geo
 from dados import CARDAPIO, CATEGORIAS, LOJAS
 
 
-def _normalizar(texto):
-    """minusculo, sem acento, sem espaco nas bordas — para comparar nomes de loja."""
-    import unicodedata
-    texto = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode()
-    return texto.strip().lower()
-
-
 def _resolver_loja(texto):
     """Aceita 'A'/'B' ou o nome da loja (case/acento insensivel). Retorna o
     id ou None se nao reconhecer."""
@@ -28,9 +21,9 @@ def _resolver_loja(texto):
         return None
     if texto.upper() in LOJAS:
         return texto.upper()
-    normalizado = _normalizar(texto)
+    normalizado = geo._normalizar(texto)
     for loja in LOJAS.values():
-        if _normalizar(loja["nome"]) == normalizado:
+        if geo._normalizar(loja["nome"]) == normalizado:
             return loja["id"]
     return None
 

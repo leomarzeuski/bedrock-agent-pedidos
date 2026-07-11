@@ -40,6 +40,7 @@ def test_finalizar_pedido_loga_evento_estruturado(monkeypatch, capsys):
     assert linha["loja"] == resultado["loja"]
     assert linha["subtotal"] == resultado["subtotal"]
     assert linha["frete"] == resultado["frete"]
+    assert linha["frete_gratis"] == resultado["frete_gratis"]
     assert linha["observacoes"] == "deixar na portaria"
 
 

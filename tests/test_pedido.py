@@ -21,7 +21,7 @@ def test_parse_quantidade_valores_validos(texto, esperado):
     assert valor == esperado
 
 
-@pytest.mark.parametrize("texto", ["duas", "2x", "1.5", "-2", "0", "", None, "abckg"])
+@pytest.mark.parametrize("texto", ["duas", "2x", "1.5", "-2", "0", "", None, "abckg", "nan", "inf"])
 def test_parse_quantidade_valores_invalidos_dao_erro_explicito(texto):
     valor, erro = pedido.parse_quantidade(texto)
     assert valor is None

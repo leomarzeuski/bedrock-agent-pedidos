@@ -49,6 +49,14 @@ def test_loja_a_fronteira_00_00_ainda_aberta_ate_24h():
     assert geo.loja_aberta(LOJAS["A"], momento) is True
 
 
+def test_loja_a_00_00_apos_dia_fechado_nao_abre_de_gratis():
+    # segunda (weekday 0) nao tem horario; terca 00:00 nao pode contar como
+    # aberta so porque a janela de terca cruza a meia-noite — nao ha cauda
+    # legitima de segunda (que estava fechada) para justificar isso.
+    momento = datetime(2026, 7, 14, 0, 0, tzinfo=TZ)  # terca 00:00
+    assert geo.loja_aberta(LOJAS["A"], momento) is False
+
+
 def test_loja_a_00_01_ja_fechada():
     momento = datetime(2026, 7, 15, 0, 1, tzinfo=TZ)
     assert geo.loja_aberta(LOJAS["A"], momento) is False

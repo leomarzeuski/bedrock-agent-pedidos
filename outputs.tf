@@ -11,5 +11,5 @@ output "lambda_function" {
 }
 
 output "como_testar" {
-  value = "ALIAS_ID=${aws_bedrockagent_agent_alias.dev.agent_alias_id} python3 invoke.py 'oi, quero fazer um pedido'"
+  value = "AGENT_ID=${aws_bedrockagent_agent.this.agent_id} ALIAS_ID=${aws_bedrockagent_agent_alias.dev.agent_alias_id} python3 invoke.py 'oi, quero fazer um pedido'"
 }

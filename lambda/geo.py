@@ -46,13 +46,25 @@ def loja_aberta(loja, momento=None):
     """True se a loja esta dentro de alguma faixa de funcionamento agora.
 
     Considera tambem as faixas do dia anterior que cruzam a meia-noite (ex.:
-    terca 18:00-00:00 continua "aberta" no instante 00:00 de quarta)."""
+    terca 18:00-00:00 continua "aberta" no instante 00:00 de quarta).
+
+    A faixa de hoje que cruza a meia-noite so abre a partir do proprio
+    horario de abertura (atual >= abre): a "cauda" pos-meia-noite (atual <=
+    fecha) e responsabilidade exclusiva do branch de ontem, que so existe se
+    ontem realmente teve horario — evita abrir "de gratis" as 00:00 do
+    primeiro dia depois de um dia fechado (ex.: segunda fechada, terca
+    18:00-00:00: terca 00:00 nao pode contar como aberta, pois nao ha
+    cauda legitima de segunda)."""
     momento = momento or agora()
     atual = momento.hour * 60 + momento.minute
 
     faixas_hoje = loja["horarios"].get(momento.weekday(), [])
-    if any(_dentro_da_faixa(atual, abre, fecha) for abre, fecha in faixas_hoje):
-        return True
+    for abre, fecha in faixas_hoje:
+        if _cruza_meia_noite(abre, fecha):
+            if atual >= _minutos(abre):
+                return True
+        elif _dentro_da_faixa(atual, abre, fecha):
+            return True
 
     dia_anterior = (momento.weekday() - 1) % 7
     faixas_ontem = loja["horarios"].get(dia_anterior, [])
