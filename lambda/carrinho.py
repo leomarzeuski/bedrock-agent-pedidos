@@ -70,16 +70,38 @@ def _salvar(session_attrs, cart):
 
 
 def _resumo(cart):
-    """Carrinho precificado para exibir (linhas com preco + subtotal)."""
+    """Carrinho precificado para exibir (linhas com preco + subtotal + numero
+    da posicao, usado por remover_item/alterar_quantidade)."""
     linhas, subtotal, erro = pedido.precificar(cart["loja"], cart["itens"])
     if erro:
         return {"erro": erro}
+    for numero, linha in enumerate(linhas, start=1):
+        linha["numero"] = numero
     return {
         "loja": LOJAS[cart["loja"]]["nome"],
         "itens": linhas,
         "quantidade_itens": sum(l["qtd"] for l in linhas),
         "subtotal": subtotal,
     }
+
+
+def _chave_item(it):
+    """Assinatura de um item para decidir se e 'o mesmo' de outro (soma qtd em
+    vez de duplicar linha)."""
+    return (it["id"], it.get("tamanho"), it.get("borda"),
+            tuple(it.get("meio_a_meio") or []), it.get("obs"))
+
+
+def _mesclar_itens(existentes, novos):
+    """Soma a quantidade de itens identicos (mesmo id/tamanho/borda/
+    meio_a_meio/obs) em vez de duplicar a linha."""
+    for novo in novos:
+        chave_novo = _chave_item(novo)
+        igual = next((it for it in existentes if _chave_item(it) == chave_novo), None)
+        if igual:
+            igual["qtd"] += novo["qtd"]
+        else:
+            existentes.append(novo)
 
 
 def adicionar_itens(params, session_attrs):
@@ -125,7 +147,7 @@ def adicionar_itens(params, session_attrs):
         return {"sucesso": False, "erro": erro}
 
     cart["loja"] = loja_id
-    cart["itens"].extend(novos)
+    _mesclar_itens(cart["itens"], novos)
     _salvar(session_attrs, cart)
 
     resultado = _resumo(cart)
@@ -139,6 +161,71 @@ def ver_carrinho(session_attrs):
     if not cart["itens"]:
         return {"vazio": True, "mensagem": "Seu carrinho ainda esta vazio."}
     return _resumo(cart)
+
+
+def remover_item(params, session_attrs):
+    """Remove um item do carrinho pela posicao mostrada em ver_carrinho
+    (campo 'numero' de cada linha, comecando em 1)."""
+    cart = _carregar(session_attrs)
+    if not cart["itens"]:
+        return {"sucesso": False, "erro": "Carrinho vazio"}
+
+    numero = params.get("numero")
+    try:
+        indice = int(numero) - 1
+    except (TypeError, ValueError):
+        return {"sucesso": False, "erro": f"Numero de item invalido: '{numero}'"}
+    if indice < 0 or indice >= len(cart["itens"]):
+        return {"sucesso": False,
+                "erro": f"Nao existe item numero {numero}. O carrinho tem {len(cart['itens'])} item(ns)."}
+
+    removido = cart["itens"].pop(indice)
+    nome_removido = get_item(removido["id"])["nome"]
+
+    if not cart["itens"]:
+        session_attrs.pop(CHAVE, None)
+        return {"sucesso": True, "mensagem": f"{nome_removido} removido. Carrinho vazio."}
+
+    _salvar(session_attrs, cart)
+    resultado = _resumo(cart)
+    if "erro" in resultado:
+        return {"sucesso": False,
+                "erro": f"{nome_removido} removido, mas o carrinho ficou invalido: {resultado['erro']}"}
+    resultado["sucesso"] = True
+    resultado["mensagem"] = f"{nome_removido} removido."
+    return resultado
+
+
+def alterar_quantidade(params, session_attrs):
+    """Altera a quantidade (ou, para itens por kg, os gramas) de um item ja
+    no carrinho, pela posicao mostrada em ver_carrinho."""
+    cart = _carregar(session_attrs)
+    if not cart["itens"]:
+        return {"sucesso": False, "erro": "Carrinho vazio"}
+
+    numero = params.get("numero")
+    try:
+        indice = int(numero) - 1
+    except (TypeError, ValueError):
+        return {"sucesso": False, "erro": f"Numero de item invalido: '{numero}'"}
+    if indice < 0 or indice >= len(cart["itens"]):
+        return {"sucesso": False,
+                "erro": f"Nao existe item numero {numero}. O carrinho tem {len(cart['itens'])} item(ns)."}
+
+    nova_qtd, erro = pedido.parse_quantidade(params.get("quantidade"))
+    if erro:
+        return {"sucesso": False, "erro": erro}
+
+    cart["itens"][indice]["qtd"] = nova_qtd
+    _salvar(session_attrs, cart)
+
+    resultado = _resumo(cart)
+    if "erro" in resultado:
+        return {"sucesso": False,
+                "erro": f"Quantidade nao pode ser alterada: {resultado['erro']}"}
+    resultado["sucesso"] = True
+    resultado["mensagem"] = "Quantidade atualizada."
+    return resultado
 
 
 def limpar_carrinho(session_attrs):
@@ -185,7 +272,17 @@ def finalizar_pedido(params, session_attrs):
     de JSON estruturado no CloudWatch Logs (evento pedido_finalizado). O
     numero PED-... e so uma referencia para achar essa linha nos logs — nao e
     um registro consultavel em nenhum sistema, nem sobrevive fora da sessao.
+
+    Se chamado de novo (retry comum do Nova) com o carrinho ja vazio, devolve
+    o ultimo pedido finalizado nesta sessao em vez de erro, com a flag
+    ja_finalizado, no lugar de "Carrinho vazio".
     """
+    cart = _carregar(session_attrs)
+    if not cart["itens"] and CHAVE_ULTIMO_PEDIDO in session_attrs:
+        ultimo = json.loads(session_attrs[CHAVE_ULTIMO_PEDIDO])
+        ultimo["ja_finalizado"] = True
+        return ultimo
+
     resultado = revisar_pedido(params, session_attrs)
     if not resultado.get("sucesso"):
         return resultado

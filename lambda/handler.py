@@ -1,8 +1,9 @@
 """Entrada da Lambda do action group. Faz o dispatch para as funcoes do agente.
 
 Funcoes: consultar_cardapio, listar_lojas, adicionar_itens, ver_carrinho,
-limpar_carrinho, revisar_pedido, finalizar_pedido. As funcoes de carrinho leem e
-escrevem o carrinho em sessionAttributes, que o Bedrock mantem entre os turnos.
+remover_item, alterar_quantidade, limpar_carrinho, revisar_pedido,
+finalizar_pedido. As funcoes de carrinho leem e escrevem o carrinho em
+sessionAttributes, que o Bedrock mantem entre os turnos.
 """
 
 import json
@@ -95,6 +96,10 @@ def lambda_handler(event, context):
         result = carrinho.adicionar_itens(params, session_attrs)
     elif function == "ver_carrinho":
         result = carrinho.ver_carrinho(session_attrs)
+    elif function == "remover_item":
+        result = carrinho.remover_item(params, session_attrs)
+    elif function == "alterar_quantidade":
+        result = carrinho.alterar_quantidade(params, session_attrs)
     elif function == "limpar_carrinho":
         result = carrinho.limpar_carrinho(session_attrs)
     elif function == "revisar_pedido":

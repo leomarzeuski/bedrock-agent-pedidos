@@ -69,6 +69,37 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
       }
 
       functions {
+        name        = "remover_item"
+        description = "Remove um item do carrinho pela posicao numerada mostrada em ver_carrinho (campo 'numero' de cada linha). Use quando a pessoa disser para tirar ou cancelar um item especifico"
+
+        parameters {
+          map_block_key = "numero"
+          type          = "string"
+          description   = "Posicao do item no carrinho (1 = primeiro item), conforme o numero mostrado por ver_carrinho. Ex.: '2' remove o segundo item da lista"
+          required      = true
+        }
+      }
+
+      functions {
+        name        = "alterar_quantidade"
+        description = "Altera a quantidade (ou, para itens vendidos por kg, os gramas) de um item ja no carrinho, pela posicao numerada mostrada em ver_carrinho. Use quando a pessoa disser para mudar de quantas unidades ou gramas ela quer"
+
+        parameters {
+          map_block_key = "numero"
+          type          = "string"
+          description   = "Posicao do item no carrinho (1 = primeiro item), conforme o numero mostrado por ver_carrinho. Ex.: '1' altera o primeiro item"
+          required      = true
+        }
+
+        parameters {
+          map_block_key = "quantidade"
+          type          = "string"
+          description   = "Nova quantidade. Para itens normais, um numero de unidades (ex.: '3'). Para itens vendidos por kg (categoria salgados), os gramas (ex.: '500' ou '500g'; '1kg' = 1000g)"
+          required      = true
+        }
+      }
+
+      functions {
         name        = "limpar_carrinho"
         description = "Esvazia o carrinho para recomecar o pedido do zero"
       }

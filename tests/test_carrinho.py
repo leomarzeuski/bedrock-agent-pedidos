@@ -66,3 +66,104 @@ def test_finalizar_pedido_guarda_ultimo_pedido_na_sessao_e_esvazia_carrinho(monk
     assert carrinho.CHAVE_ULTIMO_PEDIDO in session_attrs
     salvo = json.loads(session_attrs[carrinho.CHAVE_ULTIMO_PEDIDO])
     assert salvo["pedido_id"] == resultado["pedido_id"]
+
+
+def test_ver_carrinho_numera_as_linhas(monkeypatch):
+    session_attrs = _carrinho_com_pizza(monkeypatch)
+    resultado = carrinho.ver_carrinho(session_attrs)
+    assert resultado["itens"][0]["numero"] == 1
+
+
+def test_adicionar_item_identico_soma_quantidade_em_vez_de_duplicar(monkeypatch):
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+    carrinho.adicionar_itens({"itens": "hb01|2"}, session_attrs)
+    resultado = carrinho.adicionar_itens({"itens": "hb01|3"}, session_attrs)
+
+    assert resultado["sucesso"] is True
+    assert len(resultado["itens"]) == 1
+    assert resultado["itens"][0]["qtd"] == 5
+
+
+def test_adicionar_itens_diferentes_nao_mescla(monkeypatch):
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+    carrinho.adicionar_itens({"itens": "hb01|2"}, session_attrs)
+    resultado = carrinho.adicionar_itens({"itens": "bb01|1"}, session_attrs)
+
+    assert len(resultado["itens"]) == 2
+
+
+def test_remover_item_por_posicao(monkeypatch):
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+    carrinho.adicionar_itens({"itens": "hb01|2 ; bb01|1"}, session_attrs)
+
+    resultado = carrinho.remover_item({"numero": 2}, session_attrs)
+
+    assert resultado["sucesso"] is True
+    assert len(resultado["itens"]) == 1
+    assert resultado["itens"][0]["item"] == "Classico da Casa"  # so restou o hamburguer (bb01 foi removido)
+
+
+def test_remover_numero_invalido_da_erro(monkeypatch):
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+    carrinho.adicionar_itens({"itens": "hb01|2"}, session_attrs)
+
+    resultado = carrinho.remover_item({"numero": 9}, session_attrs)
+    assert resultado["sucesso"] is False
+
+
+def test_remover_carrinho_vazio_da_erro():
+    resultado = carrinho.remover_item({"numero": 1}, {})
+    assert resultado["sucesso"] is False
+
+
+def test_remover_ultimo_item_esvazia_o_carrinho(monkeypatch):
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+    carrinho.adicionar_itens({"itens": "hb01|2"}, session_attrs)
+
+    resultado = carrinho.remover_item({"numero": 1}, session_attrs)
+
+    assert resultado["sucesso"] is True
+    assert carrinho.CHAVE not in session_attrs
+
+
+def test_alterar_quantidade_por_posicao(monkeypatch):
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+    carrinho.adicionar_itens({"itens": "hb01|2"}, session_attrs)
+
+    resultado = carrinho.alterar_quantidade({"numero": 1, "quantidade": "5"}, session_attrs)
+
+    assert resultado["sucesso"] is True
+    assert resultado["itens"][0]["qtd"] == 5
+
+
+def test_alterar_quantidade_invalida_da_erro(monkeypatch):
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+    carrinho.adicionar_itens({"itens": "hb01|2"}, session_attrs)
+
+    resultado = carrinho.alterar_quantidade({"numero": 1, "quantidade": "zero"}, session_attrs)
+    assert resultado["sucesso"] is False
+
+
+def test_finalizar_pedido_chamado_2x_e_idempotente(monkeypatch, capsys):
+    mock_cep_valido(monkeypatch)
+    session_attrs = _carrinho_com_pizza(monkeypatch)
+
+    primeiro = carrinho.finalizar_pedido(
+        {"cep": "01310100", "nome_cliente": "Bia"}, session_attrs)
+    assert "ja_finalizado" not in primeiro
+    capsys.readouterr()  # limpa o log do primeiro finalizar
+
+    segundo = carrinho.finalizar_pedido(
+        {"cep": "01310100", "nome_cliente": "Bia"}, session_attrs)
+
+    assert segundo["sucesso"] is True
+    assert segundo["ja_finalizado"] is True
+    assert segundo["pedido_id"] == primeiro["pedido_id"]
+    assert capsys.readouterr().out == ""  # 2a chamada nao gera novo log

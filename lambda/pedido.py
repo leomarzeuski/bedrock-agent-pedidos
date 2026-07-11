@@ -9,6 +9,41 @@ import geo
 from dados import BORDAS, get_item
 
 
+def parse_quantidade(texto):
+    """Converte o texto de uma quantidade num inteiro positivo.
+
+    Aceita numero puro (unidades ou, para itens por peso, gramas: "3", "500")
+    ou peso com sufixo ("500g", "1kg" -> 1000g; aceita virgula decimal, mas
+    so quando ha sufixo kg: "1,5kg" -> 1500). Sem sufixo kg (numero puro ou
+    sufixo "g"), a quantidade tem que ser um inteiro — casas decimais dao
+    erro. Retorna (valor, erro): erro e None se valido, e nesse caso valor e
+    sempre um inteiro > 0; caso contrario valor e None.
+    """
+    bruto = str(texto if texto is not None else "").strip().lower().replace(",", ".")
+    if not bruto:
+        return None, "Quantidade nao informada"
+
+    if bruto.endswith("kg"):
+        numero, fator, aceita_decimal = bruto[:-2].strip(), 1000, True
+    elif bruto.endswith("g"):
+        numero, fator, aceita_decimal = bruto[:-1].strip(), 1, False
+    else:
+        numero, fator, aceita_decimal = bruto, 1, False
+
+    try:
+        bruto_float = float(numero)
+    except ValueError:
+        return None, f"Quantidade invalida: '{texto}'. Informe um numero, ex.: '2' ou, para itens por peso, '500g'"
+
+    if not aceita_decimal and bruto_float != int(bruto_float):
+        return None, f"Quantidade invalida: '{texto}'. Informe um numero, ex.: '2' ou, para itens por peso, '500g'"
+
+    valor = round(bruto_float * fator)
+    if valor <= 0:
+        return None, f"Quantidade deve ser maior que zero: '{texto}'"
+    return valor, None
+
+
 def parse_itens(texto):
     """Converte o texto do pedido em lista de itens.
 
