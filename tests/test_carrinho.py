@@ -220,3 +220,38 @@ def test_revisar_pedido_fora_da_area_de_entrega_da_erro(monkeypatch):
 
     assert resultado["sucesso"] is False
     assert "area de entrega" in resultado["erro"].lower()
+
+
+def test_fluxo_completo_adicionar_remover_alterar_finalizar_2x(monkeypatch, capsys):
+    mock_cep_valido(monkeypatch)
+    monkeypatch.setattr(geo, "agora", lambda: MOMENTO_ABERTO)
+    session_attrs = {}
+
+    r1 = carrinho.adicionar_itens({"itens": "hb01|2 ; bb01|1"}, session_attrs)
+    assert r1["sucesso"] is True
+    assert r1["quantidade_itens"] == 3
+    assert len(r1["itens"]) == 2
+
+    r2 = carrinho.adicionar_itens({"itens": "pz01|1|media"}, session_attrs)
+    assert r2["sucesso"] is True
+    assert len(r2["itens"]) == 3
+
+    r3 = carrinho.remover_item({"numero": 2}, session_attrs)  # remove bb01
+    assert r3["sucesso"] is True
+    assert len(r3["itens"]) == 2
+
+    r4 = carrinho.alterar_quantidade({"numero": "1", "quantidade": "5"}, session_attrs)
+    assert r4["sucesso"] is True
+    assert r4["itens"][0]["qtd"] == 5
+
+    r5 = carrinho.finalizar_pedido({"cep": "01310100", "nome_cliente": "Bia"}, session_attrs)
+    assert r5["sucesso"] is True
+    assert "ja_finalizado" not in r5
+    primeiro_id = r5["pedido_id"]
+    capsys.readouterr()  # limpa o log do primeiro finalizar
+
+    r6 = carrinho.finalizar_pedido({"cep": "01310100", "nome_cliente": "Bia"}, session_attrs)
+    assert r6["sucesso"] is True
+    assert r6["ja_finalizado"] is True
+    assert r6["pedido_id"] == primeiro_id
+    assert capsys.readouterr().out == ""  # 2a chamada nao gera novo log

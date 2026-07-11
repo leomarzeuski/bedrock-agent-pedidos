@@ -84,6 +84,15 @@ AGENT_ID=$(terraform output -raw agent_id) ALIAS_ID=$(terraform output -raw agen
 - Lambda: edite os arquivos em `lambda/` → `apply` (o hash do zip força o update) + replace do alias
 - Mudanças no DRAFT aparecem no **Test** do console na hora; o alias só pega depois do replace
 
+## Testes
+
+Suite pytest cobrindo `pedido.py`, `geo.py`, `carrinho.py` e `handler.py` — sem rede nem AWS (CEP é mockado, horário é injetado via `momento`/`geo.agora`).
+
+```bash
+source .venv/bin/activate && pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
 ## Custo
 
 Agente parado = R$ 0. Paga-se só a inferência do Nova Pro por invocação (centavos) e a Lambda fica no free tier.

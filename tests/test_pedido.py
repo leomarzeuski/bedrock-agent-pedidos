@@ -109,3 +109,22 @@ def test_precificar_borda_soma_o_adicional():
     linhas, _, erro = pedido.precificar("A", itens)
     assert erro is None
     assert linhas[0]["subtotal"] == 45.9 + 8.0
+
+
+def test_parse_itens_varios_itens_no_mesmo_texto():
+    itens, erro = pedido.parse_itens("bb01|3 ; hb01|2 ; pz04|1|grande|catupiry|pz01")
+    assert erro is None
+    assert [i["id"] for i in itens] == ["bb01", "hb01", "pz04"]
+    assert itens[2]["meio_a_meio"] == ["pz04", "pz01"]
+
+
+def test_parse_itens_ignora_blocos_vazios():
+    itens, erro = pedido.parse_itens("bb01|1 ; ; hb01|1")
+    assert erro is None
+    assert len(itens) == 2
+
+
+def test_parse_itens_id_vazio_e_ignorado():
+    itens, erro = pedido.parse_itens("|1")
+    assert erro is None
+    assert itens == []
