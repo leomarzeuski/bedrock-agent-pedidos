@@ -13,6 +13,7 @@ import pedido
 from dados import LOJAS, get_item
 
 CHAVE = "carrinho"
+CHAVE_ULTIMO_PEDIDO = "ultimo_pedido"
 
 
 def _lojas_do_item(item_id):
@@ -178,16 +179,35 @@ def revisar_pedido(params, session_attrs):
 
 
 def finalizar_pedido(params, session_attrs):
-    """Revalida o carrinho, registra o pedido e esvazia o carrinho."""
+    """Revalida o carrinho, registra o pedido no log e esvazia o carrinho.
+
+    Sem banco de dados: "registrar" e gravar o pedido completo como uma linha
+    de JSON estruturado no CloudWatch Logs (evento pedido_finalizado). O
+    numero PED-... e so uma referencia para achar essa linha nos logs — nao e
+    um registro consultavel em nenhum sistema, nem sobrevive fora da sessao.
+    """
     resultado = revisar_pedido(params, session_attrs)
     if not resultado.get("sucesso"):
         return resultado
 
-    resultado["pedido_id"] = f"PED-{uuid.uuid4().hex[:8].upper()}"
+    pedido_id = f"PED-{uuid.uuid4().hex[:8].upper()}"
+    resultado["pedido_id"] = pedido_id
     resultado["cliente"] = params.get("nome_cliente")
     obs = (params.get("observacoes") or "").strip()
     if obs:
         resultado["observacoes"] = obs
 
+    print(json.dumps({
+        "evento": "pedido_finalizado",
+        "pedido_id": pedido_id,
+        "loja": resultado["loja"],
+        "itens": resultado["itens"],
+        "endereco": resultado["endereco_entrega"],
+        "total": resultado["total"],
+        "cliente": resultado["cliente"],
+        "timestamp": geo.agora().isoformat(),
+    }, ensure_ascii=False))
+
+    session_attrs[CHAVE_ULTIMO_PEDIDO] = json.dumps(resultado, ensure_ascii=False)
     session_attrs.pop(CHAVE, None)
     return resultado

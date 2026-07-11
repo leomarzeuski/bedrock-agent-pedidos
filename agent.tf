@@ -87,7 +87,7 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
 
       functions {
         name        = "finalizar_pedido"
-        description = "Registra o pedido a partir do carrinho e gera o numero. Chamar somente apos a pessoa confirmar o resumo do revisar_pedido"
+        description = "Fecha o pedido: grava o carrinho completo como log estruturado no CloudWatch e gera o numero, que serve de referencia para a loja localizar o pedido nos logs. Nao existe registro consultavel fora desta conversa nem fora da sessao. Chamar somente apos a pessoa confirmar o resumo do revisar_pedido"
 
         parameters {
           map_block_key = "cep"

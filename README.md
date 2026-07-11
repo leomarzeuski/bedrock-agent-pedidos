@@ -34,7 +34,7 @@ Lambda modularizada (`lambda/`):
 4. `ver_carrinho()` — mostra o que já foi escolhido, com preços.
 5. `limpar_carrinho()` — esvazia o carrinho.
 6. `revisar_pedido(cep)` — resumo final com frete e total, **sem registrar**.
-7. `finalizar_pedido(cep, nome_cliente, observacoes?)` — revalida e registra, gerando o número.
+7. `finalizar_pedido(cep, nome_cliente, observacoes?)` — revalida o carrinho, grava o pedido como log estruturado no CloudWatch (não é um registro consultável fora da conversa) e gera o número.
 
 O carrinho fica em `sessionAttributes`, que o Bedrock mantém entre os turnos — a Lambda é a dona dos itens, então nada se perde na conversa. As funções **recusam** com motivo explicado: loja fechada, item fora do horário, item de outra loja, ou CEP inválido.
 
