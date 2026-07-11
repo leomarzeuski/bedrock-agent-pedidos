@@ -10,6 +10,6 @@ output "lambda_function" {
   value = aws_lambda_function.actions.function_name
 }
 
-output "invoke_example" {
-  value = "aws bedrock-agent-runtime invoke-agent --agent-id ${aws_bedrockagent_agent.this.agent_id} --agent-alias-id ${aws_bedrockagent_agent_alias.dev.agent_alias_id} --session-id teste-01 --input-text 'oi, quero fazer um pedido' --region ${var.region} resposta.json"
+output "como_testar" {
+  value = "ALIAS_ID=${aws_bedrockagent_agent_alias.dev.agent_alias_id} python3 invoke.py 'oi, quero fazer um pedido'"
 }

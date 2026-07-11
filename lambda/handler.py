@@ -1,94 +1,85 @@
+"""Entrada da Lambda do action group. Faz o dispatch para as funcoes do agente.
+
+Funcoes: consultar_cardapio, listar_lojas, validar_cep, cotar_pedido, criar_pedido.
+"""
+
 import json
-import urllib.request
-import uuid
 
-CARDAPIO = [
-    {"id": "x1", "nome": "X-Burger", "descricao": "Pao, hamburguer 150g, queijo", "preco": 22.90},
-    {"id": "x2", "nome": "X-Salada", "descricao": "Pao, hamburguer 150g, queijo, alface, tomate", "preco": 25.90},
-    {"id": "x3", "nome": "X-Bacon", "descricao": "Pao, hamburguer 150g, queijo, bacon", "preco": 28.90},
-    {"id": "b1", "nome": "Refrigerante lata", "descricao": "350ml", "preco": 7.00},
-    {"id": "b2", "nome": "Suco natural", "descricao": "Laranja 400ml", "preco": 10.00},
-    {"id": "s1", "nome": "Batata frita", "descricao": "Porcao 200g", "preco": 15.00},
-]
-
-TAXA_ENTREGA = 8.00
+import geo
+import pedido
+from dados import CARDAPIO, CATEGORIAS, LOJAS
 
 
-def consultar_cardapio():
-    return {"cardapio": CARDAPIO, "taxa_entrega": TAXA_ENTREGA}
+def consultar_cardapio(params):
+    """Sem categoria: lista as categorias. Com categoria: itens da categoria,
+    opcionalmente filtrados pela loja."""
+    categoria = (params.get("categoria") or "").strip().lower()
+    loja_id = (params.get("loja") or "").strip().upper() or None
+
+    if not categoria:
+        return {
+            "categorias": [{"chave": k, "nome": v} for k, v in CATEGORIAS.items()],
+            "instrucao": "Chame consultar_cardapio novamente com o parametro 'categoria'.",
+        }
+    if categoria not in CATEGORIAS:
+        return {"erro": f"Categoria invalida: {categoria}", "categorias": list(CATEGORIAS)}
+
+    itens = []
+    for it in CARDAPIO:
+        if it["categoria"] != categoria:
+            continue
+        if loja_id and loja_id not in it["lojas"]:
+            continue
+        registro = {
+            "id": it["id"],
+            "nome": it["nome"],
+            "descricao": it["descricao"],
+            "lojas": it["lojas"],
+            "disponivel_agora": geo.item_disponivel(it),
+        }
+        if it["tipo"] == "pizza":
+            registro["tamanhos"] = it["tamanhos"]
+            registro["meio_a_meio"] = True
+        elif it["tipo"] == "combo":
+            registro["preco"] = it["preco"]
+            registro["inclui"] = it["inclui"]
+        else:
+            registro["preco"] = it["preco"]
+        if it.get("disponivel_de"):
+            registro["horario"] = f"{it['disponivel_de']}-{it['disponivel_ate']}"
+        itens.append(registro)
+
+    return {"categoria": categoria, "quantidade": len(itens), "itens": itens}
 
 
-def validar_cep(cep):
-    digitos = "".join(c for c in str(cep) if c.isdigit())
-    if len(digitos) != 8:
-        return {"valido": False, "erro": "CEP deve conter 8 digitos"}
-    try:
-        req = urllib.request.Request(
-            f"https://viacep.com.br/ws/{digitos}/json/",
-            headers={"User-Agent": "agente-pedidos-estudo"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
-        return {"valido": False, "erro": "Falha ao consultar o CEP, tente novamente"}
-    if data.get("erro"):
-        return {"valido": False, "erro": "CEP nao encontrado"}
-    return {
-        "valido": True,
-        "endereco": {
-            "logradouro": data.get("logradouro"),
-            "bairro": data.get("bairro"),
-            "cidade": data.get("localidade"),
-            "uf": data.get("uf"),
-            "cep": digitos,
-        },
-    }
+def listar_lojas():
+    """As 2 lojas com endereco, horario, frete e se estao abertas agora."""
+    return {"lojas": [{
+        "id": loja["id"],
+        "nome": loja["nome"],
+        "endereco": loja["endereco"],
+        "horario": loja["horario_texto"],
+        "aberta_agora": geo.loja_aberta(loja),
+        "frete_base": loja["frete_base"],
+        "frete_gratis_acima": loja["frete_gratis_acima"],
+    } for loja in LOJAS.values()]}
 
 
-def criar_pedido(params):
-    try:
-        itens = json.loads(params.get("itens", "[]"))
-    except json.JSONDecodeError:
-        return {"sucesso": False, "erro": "Formato de itens invalido"}
-    if not itens:
-        return {"sucesso": False, "erro": "Pedido sem itens"}
-
-    catalogo = {item["id"]: item for item in CARDAPIO}
-    resumo = []
-    subtotal = 0.0
-
-    for item in itens:
-        produto = catalogo.get(item.get("id"))
-        qtd = int(item.get("qtd", 0))
-        if not produto or qtd < 1:
-            return {"sucesso": False, "erro": f"Item invalido: {item}"}
-        subtotal += produto["preco"] * qtd
-        resumo.append({"nome": produto["nome"], "qtd": qtd, "preco_unitario": produto["preco"]})
-
-    return {
-        "sucesso": True,
-        "pedido_id": f"PED-{uuid.uuid4().hex[:8].upper()}",
-        "cliente": params.get("nome_cliente"),
-        "cep_entrega": params.get("cep"),
-        "itens": resumo,
-        "subtotal": round(subtotal, 2),
-        "taxa_entrega": TAXA_ENTREGA,
-        "total": round(subtotal + TAXA_ENTREGA, 2),
-    }
+_FUNCOES = {
+    "consultar_cardapio": lambda p: consultar_cardapio(p),
+    "listar_lojas": lambda p: listar_lojas(),
+    "validar_cep": lambda p: geo.consultar_cep(p.get("cep", "")),
+    "cotar_pedido": lambda p: pedido.cotar_pedido(p),
+    "criar_pedido": lambda p: pedido.criar_pedido(p),
+}
 
 
 def lambda_handler(event, context):
     function = event.get("function", "")
     params = {p["name"]: p["value"] for p in event.get("parameters", [])}
 
-    if function == "consultar_cardapio":
-        result = consultar_cardapio()
-    elif function == "validar_cep":
-        result = validar_cep(params.get("cep", ""))
-    elif function == "criar_pedido":
-        result = criar_pedido(params)
-    else:
-        result = {"erro": f"Funcao desconhecida: {function}"}
+    executor = _FUNCOES.get(function)
+    result = executor(params) if executor else {"erro": f"Funcao desconhecida: {function}"}
 
     return {
         "messageVersion": "1.0",

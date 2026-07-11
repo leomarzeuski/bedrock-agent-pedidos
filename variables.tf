@@ -10,5 +10,5 @@ variable "agent_name" {
 
 variable "foundation_model" {
   type    = string
-  default = "us.amazon.nova-lite-v1:0"
+  default = "us.amazon.nova-pro-v1:0"
 }
