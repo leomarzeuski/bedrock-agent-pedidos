@@ -2,6 +2,7 @@ data "archive_file" "lambda" {
   type        = "zip"
   source_dir  = "${path.module}/lambda"
   output_path = "${path.module}/lambda_payload.zip"
+  excludes    = ["__pycache__", "**/*.pyc"]
 }
 
 resource "aws_lambda_function" "actions" {

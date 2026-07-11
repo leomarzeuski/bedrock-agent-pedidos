@@ -3,7 +3,7 @@ resource "aws_bedrockagent_agent" "this" {
   agent_resource_role_arn     = aws_iam_role.agent.arn
   foundation_model            = var.foundation_model
   instruction                 = file("${path.module}/instructions.txt")
-  idle_session_ttl_in_seconds = 600
+  idle_session_ttl_in_seconds = 3600
   description                 = "Agente de pedidos - projeto de estudo"
 }
 
@@ -27,7 +27,7 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
         parameters {
           map_block_key = "categoria"
           type          = "string"
-          description   = "Categoria: pizzas, hamburgueres, combos, porcoes, massas, japonesa, saladas, cafe_da_manha, bebidas ou sobremesas"
+          description   = "Categoria: pizzas, hamburgueres, combos, porcoes, salgados, massas, japonesa, saladas, cafe_da_manha, bebidas ou sobremesas"
           required      = false
         }
 
@@ -58,7 +58,7 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
         parameters {
           map_block_key = "itens"
           type          = "string"
-          description   = "Itens separados por ';' e campos por '|' nesta ordem: id|qtd|tamanho|borda|meio_a_meio|obs. Apenas o id e obrigatorio. tamanho, borda e meio_a_meio sao so para pizza (meio_a_meio = id do 2o sabor). Para salgados (vendidos por kg) a quantidade e em GRAMAS, ex.: 'sg01|500' = 500g. Ex.: 'bb05|3 ; hb01|2 ; pz04|1|grande|catupiry|pz01 ; sg01|500'"
+          description   = "Itens separados por ';' e campos por '|' nesta ordem: id|qtd|tamanho|borda|meio_a_meio|obs. So o id e obrigatorio. tamanho, borda e meio_a_meio sao so para pizza (meio_a_meio = id do 2o sabor); nos demais itens deixe-os vazios ate o obs. Salgados (por kg): qtd em GRAMAS ou com sufixo, ex.: 'sg01|500' ou 'sg01|1kg' = 1000g. obs e sempre o ultimo campo, ex.: 'hb01|1||||sem cebola'. Ex.: 'bb05|3 ; pz04|1|grande|catupiry|pz01 ; sg01|500 ; hb02|1||||sem cebola'"
           required      = true
         }
       }
