@@ -69,13 +69,13 @@ O AWS CLI não suporta `InvokeAgent` (é streaming), então usa-se o `invoke.py`
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate && pip install boto3
-ALIAS_ID=$(terraform output -raw agent_alias_id) python3 invoke.py "quais lojas voces tem?"
+AGENT_ID=$(terraform output -raw agent_id) ALIAS_ID=$(terraform output -raw agent_alias_id) python3 invoke.py "quais lojas voces tem?"
 ```
 
 Ele imprime a `session` no fim; para continuar a mesma conversa, passe-a como 2º argumento:
 
 ```bash
-ALIAS_ID=$(terraform output -raw agent_alias_id) python3 invoke.py "quero uma pizza grande meia calabresa meia marguerita" cli-a1b2c3d4
+AGENT_ID=$(terraform output -raw agent_id) ALIAS_ID=$(terraform output -raw agent_alias_id) python3 invoke.py "quero uma pizza grande meia calabresa meia marguerita" cli-a1b2c3d4
 ```
 
 ## Iterando

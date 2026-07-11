@@ -58,7 +58,7 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
         parameters {
           map_block_key = "itens"
           type          = "string"
-          description   = "Itens separados por ';' e campos por '|' nesta ordem: id|qtd|tamanho|borda|meio_a_meio|obs. So o id e obrigatorio. tamanho, borda e meio_a_meio sao so para pizza (meio_a_meio = id do 2o sabor); nos demais itens deixe-os vazios ate o obs. Salgados (por kg): qtd em GRAMAS ou com sufixo, ex.: 'sg01|500' ou 'sg01|1kg' = 1000g. obs e sempre o ultimo campo, ex.: 'hb01|1||||sem cebola'. Ex.: 'bb05|3 ; pz04|1|grande|catupiry|pz01 ; sg01|500 ; hb02|1||||sem cebola'"
+          description   = "Itens separados por ';' e campos por '|' nesta ordem: id|qtd|tamanho|borda|meio_a_meio|obs. Apenas o id e obrigatorio; tamanho, borda e meio_a_meio sao so para pizza (meio_a_meio = id do 2o sabor) e devem ficar vazios nos demais itens ate chegar no obs. Salgados (por kg): qtd em GRAMAS ou com sufixo, ex.: 'sg01|500' ou 'sg01|1kg' = 1000g. obs e sempre o ultimo campo: para pizza, 'pz04|1|grande|catupiry|pz01|caprichar no queijo'; para os demais, 'hb01|1||||sem cebola'."
           required      = true
         }
       }
