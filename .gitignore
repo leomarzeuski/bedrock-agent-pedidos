@@ -24,8 +24,9 @@ venv/
 __pycache__/
 *.pyc
 
-# Artefato de build do Lambda (regenerado pelo terraform)
+# Artefatos de build das Lambdas (regenerados pelo terraform)
 lambda_payload.zip
+api_payload.zip
 
 # Saídas locais de invocação
 resposta.json

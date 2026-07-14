@@ -78,6 +78,37 @@ Ele imprime a `session` no fim; para continuar a mesma conversa, passe-a como 2�
 AGENT_ID=$(terraform output -raw agent_id) ALIAS_ID=$(terraform output -raw agent_alias_id) python3 invoke.py "quero uma pizza grande meia calabresa meia marguerita" cli-a1b2c3d4
 ```
 
+## API HTTP (Lambda Function URL)
+
+Além do `invoke.py`, o agente é exposto por uma **API HTTP**: uma segunda Lambda ("wrapper", `api/app.py`) que chama o `invoke_agent` e fica atrás de uma Function URL. É criada pelo mesmo `terraform apply`; a URL e a chave saem nos outputs:
+
+```bash
+URL=$(terraform output -raw api_url)
+KEY=$(terraform output -raw api_key)
+```
+
+**Conversar** — `POST` com body `{"mensagem": "...", "session": "opcional"}` → `{"resposta": "...", "session": "..."}`:
+
+```bash
+curl -sS "$URL" -H "x-api-key: $KEY" -H 'content-type: application/json' \
+     -d '{"mensagem":"quais lojas voces tem?"}'
+```
+
+A `session` devolvida mantém o carrinho/contexto entre chamadas (é o mesmo `sessionId` do Bedrock) — reenvie-a na próxima mensagem:
+
+```bash
+curl -sS "$URL" -H "x-api-key: $KEY" -H 'content-type: application/json' \
+     -d '{"mensagem":"quero uma pizza grande meia calabresa meia marguerita","session":"api-1a2b3c4d"}'
+```
+
+**Health check** (sem auth, não chama o agente): `curl "$URL"` → `{"ok": true}`.
+
+**Auth:** todo `POST` exige o header `x-api-key`; sem ele ou errado, `401`. A chave é gerada pelo Terraform (fora do git); para fixar a sua, defina `var.api_key`. A Function URL é pública, então a chave é a única proteção contra abuso (que vira custo de inferência) — não a embuta num front público sem um proxy que a esconda.
+
+**Erros:** `400` body inválido / sem `mensagem`; `401` sem a chave; `405` método fora de GET/POST; `500` falha ao consultar o agente (detalhe vai só para o CloudWatch).
+
+**Testes** (offline, sem AWS): `pytest tests/test_api.py -v` — injeta um cliente falso no lugar do boto3, então não gasta inferência.
+
 ## Iterando
 
 - Prompt: edite `instructions.txt` → `apply` + replace do alias

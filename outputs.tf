@@ -13,3 +13,16 @@ output "lambda_function" {
 output "como_testar" {
   value = "AGENT_ID=${aws_bedrockagent_agent.this.agent_id} ALIAS_ID=${aws_bedrockagent_agent_alias.dev.agent_alias_id} python3 invoke.py 'oi, quero fazer um pedido'"
 }
+
+output "api_url" {
+  value = aws_lambda_function_url.api.function_url
+}
+
+output "api_key" {
+  value     = local.api_key
+  sensitive = true
+}
+
+output "como_testar_api" {
+  value = "curl -sS $(terraform output -raw api_url) -H \"x-api-key: $(terraform output -raw api_key)\" -H 'content-type: application/json' -d '{\"mensagem\":\"quais lojas voces tem?\"}'"
+}
