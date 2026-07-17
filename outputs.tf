@@ -15,14 +15,14 @@ output "como_testar" {
 }
 
 output "api_url" {
-  value = aws_lambda_function_url.api.function_url
+  value = var.deploy_api ? aws_lambda_function_url.api[0].function_url : null
 }
 
 output "api_key" {
-  value     = local.api_key
+  value     = var.deploy_api ? local.api_key : null
   sensitive = true
 }
 
 output "como_testar_api" {
-  value = "curl -sS $(terraform output -raw api_url) -H \"x-api-key: $(terraform output -raw api_key)\" -H 'content-type: application/json' -d '{\"mensagem\":\"quais lojas voces tem?\"}'"
+  value = var.deploy_api ? "curl -sS $(terraform output -raw api_url) -H \"x-api-key: $(terraform output -raw api_key)\" -H 'content-type: application/json' -d '{\"mensagem\":\"quais lojas voces tem?\"}'" : null
 }

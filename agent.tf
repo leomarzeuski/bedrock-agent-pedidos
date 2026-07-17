@@ -34,7 +34,7 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
         parameters {
           map_block_key = "loja"
           type          = "string"
-          description   = "Opcional. Filtra itens vendidos na loja A ou B"
+          description   = "Opcional. Filtra itens vendidos na unidade Aflitos ou Boa Viagem"
           required      = false
         }
       }
@@ -51,7 +51,7 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
         parameters {
           map_block_key = "loja"
           type          = "string"
-          description   = "Opcional. Loja A ou B, apenas se a pessoa escolheu explicitamente. Se ela nao escolheu, deixe em branco que o sistema seleciona"
+          description   = "Opcional. Unidade Aflitos ou Boa Viagem, apenas se a pessoa escolheu explicitamente. Se ela nao escolheu, deixe em branco que o sistema seleciona"
           required      = false
         }
 
@@ -145,10 +145,28 @@ resource "aws_bedrockagent_agent_action_group" "pedidos" {
   }
 }
 
+# Acao interna "User Input" (user__askuser). Sem ela, quando o agente precisa
+# pedir um dado ao cliente (ex.: o CEP no fechamento), o prompt de orquestracao
+# do Bedrock manda perguntar via user__askuser — que nao existe se este action
+# group nao for habilitado — e o Nova entra em loop chamando outras funcoes
+# (ver_carrinho) em vez de perguntar. Com ela habilitada, ele devolve a
+# pergunta ao usuario e a conversa avanca.
+resource "aws_bedrockagent_agent_action_group" "user_input" {
+  action_group_name             = "UserInputAction"
+  agent_id                      = aws_bedrockagent_agent.this.agent_id
+  agent_version                 = "DRAFT"
+  parent_action_group_signature = "AMAZON.UserInput"
+  skip_resource_in_use_check    = true
+  prepare_agent                 = true
+}
+
 resource "aws_bedrockagent_agent_alias" "dev" {
   agent_alias_name = "dev"
   agent_id         = aws_bedrockagent_agent.this.agent_id
   description      = "Alias de teste"
 
-  depends_on = [aws_bedrockagent_agent_action_group.pedidos]
+  depends_on = [
+    aws_bedrockagent_agent_action_group.pedidos,
+    aws_bedrockagent_agent_action_group.user_input,
+  ]
 }

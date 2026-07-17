@@ -57,8 +57,10 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
 }
 
 # Role da Lambda da API (wrapper): logs + permissao de invocar o agente pelo alias.
+# Opcional: so sobe quando var.deploy_api = true.
 resource "aws_iam_role" "api" {
-  name = "${var.agent_name}-api"
+  count = var.deploy_api ? 1 : 0
+  name  = "${var.agent_name}-api"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -71,13 +73,15 @@ resource "aws_iam_role" "api" {
 }
 
 resource "aws_iam_role_policy_attachment" "api_basic" {
-  role       = aws_iam_role.api.name
+  count      = var.deploy_api ? 1 : 0
+  role       = aws_iam_role.api[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
 resource "aws_iam_role_policy" "api_invoke_agent" {
-  name = "invoke-agent"
-  role = aws_iam_role.api.id
+  count = var.deploy_api ? 1 : 0
+  name  = "invoke-agent"
+  role  = aws_iam_role.api[0].id
 
   policy = jsonencode({
     Version = "2012-10-17"
